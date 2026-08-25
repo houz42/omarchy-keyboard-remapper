@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "id": "houz42.keyboard-remapper",
   "name": "Keyboard Remapper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "houz42",
   "license": "MIT",
-  "description": "Evdev-level key remaps via keyd. Currently: tap the physical Alt key alone to emit F13 (for herdr's prefix), while holding Alt still works as a normal modifier.",
+  "description": "Evdev-level tap/hold key remaps via keyd, defined in rules.json. Ships with one example: tap the physical Alt key alone to emit F13 (for herdr's prefix), while holding Alt still works as a normal modifier.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "Keyboard Remapper",
-    "description": "Toggle the Alt-tap-to-F13 keyd rule from the bar.",
+    "description": "Toggle keyd tap/hold remap rules from the bar.",
     "category": "System",
     "allowMultiple": false,
     "defaults": {

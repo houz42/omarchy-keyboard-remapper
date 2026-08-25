@@ -1,8 +1,9 @@
 #!/bin/bash
-# Shared constants + the keyd config renderer for the "Keyboard Remapper"
-# bar-widget plugin. Sourced by both the read-only status collector and the
-# privileged apply script so "rule -> keyd config text" has exactly one
-# implementation on the shell side.
+# Shared constants for the "Keyboard Remapper" bar-widget plugin, sourced by
+# both the read-only status collector and the privileged apply script.
+# "rule -> keyd config text" rendering lives only in Panel.qml (renderConf())
+# now -- both scripts here just read/compare/write already-rendered conf
+# files, so neither needs to know the rule catalog's shape.
 
 set -u
 

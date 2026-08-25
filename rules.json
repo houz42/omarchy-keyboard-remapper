@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "id": "alt-tap-f13",
+      "label": "Alt tap → F13",
+      "description": "For herdr / tmux-style app prefixes",
+      "source": "leftalt",
+      "holdLayer": "alt",
+      "tap": "f13",
+      "defaultEnabled": false
+    }
+  ]
+}

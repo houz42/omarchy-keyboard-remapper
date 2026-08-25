@@ -1,9 +1,10 @@
 # omarchy-keyboard-remapper
 
-An [Omarchy](https://omarchy.org/) shell plugin that manages one `keyd`
-rule: a standalone tap of the physical Alt key emits `F13`, while holding
-Alt still passes through as a normal modifier for every existing
-Hyprland/app Alt-chord.
+An [Omarchy](https://omarchy.org/) shell plugin for `keyd` tap/hold
+key-remap rules, toggled from a bar-icon popup. Ships with one example rule
+(off by default): a standalone tap of the physical Alt key emits `F13`,
+while holding Alt still passes through as a normal modifier for every
+existing Hyprland/app Alt-chord.
 
 ## Why
 
@@ -46,37 +47,84 @@ place.
 omarchy plugin add https://github.com/houz42/omarchy-keyboard-remapper.git --enable
 ```
 
+The shipped example rule is **off by default** — open the bar icon's popup
+and flip the switch to turn it on.
+
+## Add your own mappings
+
+Every rule is one entry in [`rules.json`](rules.json), next to `Panel.qml`:
+
+```json
+{
+  "id": "alt-tap-f13",
+  "label": "Alt tap → F13",
+  "description": "For herdr / tmux-style app prefixes",
+  "source": "leftalt",
+  "holdLayer": "alt",
+  "tap": "f13",
+  "defaultEnabled": false
+}
+```
+
+- `id` — unique, stable string. Used to remember this rule's on/off state
+  across restarts, so don't change it once you've toggled the rule.
+- `label` — shown in the popup.
+- `description` — optional; shown under the label in place of the raw
+  syntax. The raw `source = overload(holdLayer, tap)` line is always
+  available on hover, whether or not a description is set.
+- `source` — the physical key to remap, in `keyd`'s naming (e.g. `leftalt`,
+  `rightctrl`, `capslock`). See `keyd`'s own `keys` list:
+  [`man 5 keyd`](https://github.com/rvaiya/keyd/blob/master/docs/keyd.scdoc)
+  or run `keyd -e < /dev/null` on a machine with `keyd` installed.
+- `holdLayer` — what `source` acts as when held with another key (usually
+  the same modifier family as `source` itself, e.g. `alt`, `control`,
+  `shift` — keyd's built-in layer names).
+- `tap` — what a standalone tap of `source` alone emits.
+- `defaultEnabled` — optional (default `false`) shipped on/off state for
+  anyone installing fresh. Your own toggle choice, once made, always
+  overrides this — editing `rules.json` later never resets a rule you've
+  already turned on or off.
+
+Editing `rules.json` hot-reloads — no plugin reload needed. Adding a rule
+this way is the only option today; an in-panel form for adding/editing
+rules without touching the file is planned but not built yet (see Known
+limitations).
+
 ## Manual use
 
-Toggle the rule and see live status from the bar icon's popup — there's no
+Toggle rules and see live status from the bar icon's popup — there's no
 separate CLI. The two bundled scripts are used internally by the plugin:
 
 ```sh
-bin/check-keyd-status <true|false>       # read-only status/drift JSON, non-privileged
-bin/apply-keyd-config <pending-conf-path> # privileged (via pkexec): installs keyd if missing,
-                                           # writes /etc/keyd/houz42-keyboard-remapper.conf, enables the service
+bin/check-keyd-status <expected-conf-path> # read-only status/drift JSON, non-privileged
+bin/apply-keyd-config <pending-conf-path>  # privileged (via pkexec): installs keyd if missing,
+                                            # writes /etc/keyd/houz42-keyboard-remapper.conf, enables the service
 ```
 
 ## How it works
 
-The popup writes the desired `keyd` config to a file under
-`~/.local/state/omarchy/houz42.keyboard-remapper/`, then runs
-`bin/apply-keyd-config` through a single fixed-argv `pkexec` call — never a
-`pkexec bash -c "..."`/`pkexec python3 -c "..."` string, and never
-triggered automatically, only from an explicit button press. That script
-installs `keyd` via `pacman` if it's missing, atomically writes
-`/etc/keyd/houz42-keyboard-remapper.conf`, and enables/reloads the `keyd`
-service. A separate read-only script polls status and reports drift if the
-live config doesn't match what the current toggle state should produce.
+The popup renders all enabled rules from `rules.json` into one `keyd`
+config text (`Panel.qml`'s `renderConf()`), keeps a copy of that text
+non-privileged under `~/.local/state/omarchy/houz42.keyboard-remapper/`,
+and on every status refresh compares the live `/etc/keyd/*.conf` against
+that copy to detect drift — the read-only status script never needs to know
+what a "rule" is, it just diffs two files.
+
+Applying a change runs `bin/apply-keyd-config` through a single fixed-argv
+`pkexec` call — never a `pkexec bash -c "..."`/`pkexec python3 -c "..."`
+string, and never triggered automatically, only from an explicit button
+press. That script installs `keyd` via `pacman` if it's missing, atomically
+writes `/etc/keyd/houz42-keyboard-remapper.conf`, and enables/reloads the
+`keyd` service.
 
 ## Known limitations
 
-- Manages exactly one rule (Alt tap → F13). The renderer is generic enough
-  to extend, but no UI exists yet for adding arbitrary rules.
+- No in-panel UI for adding/editing rules yet — see "Add your own
+  mappings" above; you currently hand-edit `rules.json`. Planned.
 - `keyd` merges every `*.conf` file under `/etc/keyd/`. If you run another
   keyd-based remap tool alongside this plugin, make sure neither binds the
-  same source key (`leftalt` here) — conflicting lines across files produce
-  ambiguous, load-order-dependent behavior.
+  same source key — conflicting lines across files produce ambiguous,
+  load-order-dependent behavior.
 - Uses Omarchy's internal shell components (`qs.Ui` / `qs.Commons`), which
   aren't a documented stable plugin API and could change without notice.
 
@@ -86,8 +134,8 @@ Disabling or removing the plugin (`omarchy plugin disable houz42.keyboard-remapp
 / `omarchy plugin remove houz42.keyboard-remapper`) does **not** touch
 anything outside the plugin directory — it leaves `keyd` installed, its
 service enabled, and `/etc/keyd/houz42-keyboard-remapper.conf` in place, so
-the Alt→F13 remap keeps working even after the plugin itself is gone. To
-fully remove it:
+any rules you'd enabled keep working even after the plugin itself is gone.
+To fully remove it:
 
 ```sh
 sudo rm /etc/keyd/houz42-keyboard-remapper.conf

@@ -1,18 +1,18 @@
 #!/bin/bash
 # Read-only status collector for the "Keyboard Remapper" bar-widget plugin.
 # Prints one JSON object describing whether keyd is installed/active, and
-# whether the live /etc/keyd config matches what the current rule state
-# should produce. Never mutates anything.
+# whether the live /etc/keyd config matches the given expected-conf file.
+# Never mutates anything.
 #
-# Usage: check-keyd-status <alt-tap-f13 enabled: true|false>
+# The expected-conf file is rendered by Panel.qml from the current rule
+# catalog + toggle state -- this script has no idea what a "rule" is, it
+# just diffs two files, so it never needs updating when rules.json changes.
+#
+# Usage: check-keyd-status <expected-conf-path>
 
 source "$(dirname "${BASH_SOURCE[0]}")/keyd-remapper-lib.sh"
 
-enabled="${1:-true}"
-case "$enabled" in
-  true | false) ;;
-  *) enabled="true" ;;
-esac
+expected_path="${1:?usage: check-keyd-status <expected-conf-path>}"
 
 keyd_present="false"
 if command -v keyd >/dev/null 2>&1; then
@@ -24,7 +24,10 @@ if systemctl is-active --quiet keyd 2>/dev/null; then
   keyd_active="true"
 fi
 
-expected="$(keyd_remapper_render "$enabled" leftalt alt f13)"
+expected=""
+if [[ -f $expected_path ]]; then
+  expected="$(cat "$expected_path")"
+fi
 
 actual=""
 if [[ -f $KEYD_REMAPPER_CONF ]]; then

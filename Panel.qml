@@ -5,11 +5,14 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Standalone bar-widget plugin managing one keyd rule: a standalone tap of
-// the physical Alt key emits F13 (bound to herdr's prefix), while holding
-// Alt still passes through as a normal modifier for every existing
-// Hyprland/herdr Alt-chord. CapsLock<->Ctrl and Win<->Alt stay owned by
-// Hyprland's own XKB config -- this plugin never touches them.
+// Standalone bar-widget plugin managing a small set of keyd rules, loaded
+// from rules.json next to this file -- see that file to add your own
+// mappings (or the README's "Add your own mappings" section). Ships with
+// one rule: a standalone tap of the physical Alt key emits F13 (bound to
+// herdr's prefix), while holding Alt still passes through as a normal
+// modifier for every existing Hyprland/herdr Alt-chord. CapsLock<->Ctrl and
+// Win<->Alt stay owned by Hyprland's own XKB config -- this plugin never
+// touches them.
 //
 // All root-owned mutation (installing keyd, writing /etc/keyd/*.conf,
 // (re)starting the service) happens through exactly one fixed-argv pkexec
@@ -28,20 +31,35 @@ Panel {
   readonly property color amber: "#e0a030"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string binDir: Qt.resolvedUrl("bin").toString().replace("file://", "")
+  readonly property string rulesPath: Qt.resolvedUrl("rules.json").toString().replace("file://", "")
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 10)))
 
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
 
-  // The rule: physical Alt, tap -> F13, hold -> passes through as Alt.
-  readonly property string ruleSource: "leftalt"
-  readonly property string ruleHoldLayer: "alt"
-  readonly property string ruleTap: "f13"
+  // Rule catalog, loaded from rules.json (see rulesFile below). Each entry:
+  // {id, label, description?, source, holdLayer, tap, defaultEnabled?}.
+  property var rules: []
 
+  // Per-rule on/off state, keyed by rule id -- kept separate from rules.json
+  // itself so editing rules.json (adding your own mappings, pulling plugin
+  // updates) never clobbers what you've toggled on/off, and vice versa.
   PersistentProperties {
     id: persisted
     reloadableId: "houz42.keyboard-remapper.rules"
-    property bool altTapF13Enabled: true
+    property var enabledById: ({})
+  }
+
+  function isRuleEnabled(rule) {
+    var stored = persisted.enabledById[rule.id]
+    if (stored !== undefined) return stored === true
+    return rule.defaultEnabled === true
+  }
+
+  function setRuleEnabled(id, enabled) {
+    var next = Object.assign({}, persisted.enabledById)
+    next[id] = enabled
+    persisted.enabledById = next
   }
 
   // Fires a single notify-send the first time this plugin ever observes
@@ -71,19 +89,49 @@ Panel {
     if (!root.keydPresent) return "keyd not installed"
     if (!root.keydActive) return "keyd installed, service inactive"
     if (root.drift) return "Config drifted from expected"
-    return persisted.altTapF13Enabled ? "Alt tap → F13 active" : "Alt tap → F13 disabled"
+    var onCount = root.rules.filter(root.isRuleEnabled).length
+    if (onCount === 0) return "No rules enabled"
+    return onCount + " of " + root.rules.length + " rule" + (root.rules.length === 1 ? "" : "s") + " active"
   }
 
-  // Single source of truth for "rule state -> keyd config text", mirrored
-  // line-for-line in bin/keyd-remapper-lib.sh's keyd_remapper_render() so
-  // the non-privileged pending write and the privileged apply step (plus
-  // the read-only drift check) always agree on what "expected" means.
+  // Single source of truth for "rule state -> keyd config text". Written to
+  // pendingPath (below) both right before an apply AND on every status
+  // refresh, so bin/check-keyd-status never needs to know the rule format
+  // itself -- it just compares the live /etc/keyd conf against this file.
   function renderConf() {
     var lines = "[ids]\n*\n\n[main]\n"
-    if (persisted.altTapF13Enabled) {
-      lines += root.ruleSource + " = overload(" + root.ruleHoldLayer + ", " + root.ruleTap + ")\n"
+    for (var i = 0; i < root.rules.length; i++) {
+      var rule = root.rules[i]
+      if (!root.isRuleEnabled(rule)) continue
+      lines += rule.source + " = overload(" + rule.holdLayer + ", " + rule.tap + ")\n"
     }
     return lines
+  }
+
+  function syncPendingFile() {
+    pendingFile.setText(root.renderConf())
+  }
+
+  FileView {
+    id: rulesFile
+    path: root.rulesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadRules(text())
+    onFileChanged: reload()
+  }
+
+  function loadRules(text) {
+    var trimmed = String(text || "").trim()
+    if (trimmed === "") return
+    try {
+      var parsed = JSON.parse(trimmed)
+      root.rules = Array.isArray(parsed.rules) ? parsed.rules : []
+    } catch (e) {
+      console.warn("keyboard-remapper: rules.json parse failed:", e)
+    }
+    root.syncPendingFile()
+    root.refreshNow()
   }
 
   onOpenedChanged: if (opened) refreshNow()
@@ -106,7 +154,7 @@ Panel {
   Process {
     id: statusProcess
     running: false
-    command: [root.binDir + "/check-keyd-status", persisted.altTapF13Enabled ? "true" : "false"]
+    command: [root.binDir + "/check-keyd-status", root.pendingPath]
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -179,7 +227,7 @@ Panel {
           ok = false
         }
         if (ok) {
-          root.lastMessage = persisted.altTapF13Enabled ? "Alt tap → F13 enabled." : "Alt tap → F13 disabled."
+          root.lastMessage = "Applied."
         } else {
           var detail = applyProcess.stderrText.trim()
           root.lastMessage = detail !== "" ? ("Apply failed: " + detail) : "Apply failed — see notification."
@@ -205,9 +253,9 @@ Panel {
     applyProcess.running = true
   }
 
-  function toggleAltTapF13() {
+  function toggleRule(rule) {
     if (root.applying) return
-    persisted.altTapF13Enabled = !persisted.altTapF13Enabled
+    root.setRuleEnabled(rule.id, !root.isRuleEnabled(rule))
     root.applyRules()
   }
 
@@ -298,68 +346,84 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Item {
-              width: parent.width
-              height: Math.max(ruleLabel.implicitHeight, ruleToggle.height)
+            Repeater {
+              model: root.rules
 
-              Column {
-                id: ruleLabel
-                anchors.left: parent.left
-                anchors.right: ruleToggle.left
-                anchors.rightMargin: Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(2)
+              Item {
+                id: ruleRow
+                required property var modelData
 
-                Text {
-                  width: parent.width
-                  text: "Alt tap → F13"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                width: parent.width
+                height: Math.max(ruleLabel.implicitHeight, ruleToggle.height)
+
+                Column {
+                  id: ruleLabel
+                  anchors.left: parent.left
+                  anchors.right: ruleToggle.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+
+                  Text {
+                    width: parent.width
+                    text: ruleRow.modelData.label || ruleRow.modelData.id
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  // Optional human-readable description, in place of the raw
+                  // keyd syntax -- the syntax itself is still available on
+                  // hover, for anyone who wants it.
+                  Text {
+                    visible: (ruleRow.modelData.description || "") !== ""
+                    width: parent.width
+                    text: ruleRow.modelData.description || ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
                 }
 
-                Text {
-                  width: parent.width
-                  text: "leftalt = overload(alt, f13)"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                MouseArea {
+                  id: ruleHover
+                  anchors.fill: ruleLabel
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
+                }
+
+                PanelToolTip {
+                  visible: ruleHover.containsMouse
+                  text: ruleRow.modelData.source + " = overload(" + ruleRow.modelData.holdLayer + ", " + ruleRow.modelData.tap + ")"
+                  fontFamily: root.fontFamily
+                }
+
+                ToggleSwitch {
+                  id: ruleToggle
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: root.keydPresent
+                  checked: root.isRuleEnabled(ruleRow.modelData)
+                  busy: root.applying
+                  foreground: root.foreground
+                  onToggled: root.toggleRule(ruleRow.modelData)
                 }
               }
+            }
 
-              Button {
-                id: ruleToggle
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.keydPresent
-                text: persisted.altTapF13Enabled ? "On" : "Off"
-                fontSize: Style.font.bodySmall
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
-                bordered: true
-                active: persisted.altTapF13Enabled
-                enabled: !root.applying
-                onClicked: root.toggleAltTapF13()
-              }
-
-              Button {
-                id: installButton
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                visible: !root.keydPresent
-                text: root.applying ? "Installing..." : "Install & Enable"
-                fontSize: Style.font.bodySmall
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
-                bordered: true
-                enabled: !root.applying
-                onClicked: root.installAndEnable()
-              }
+            Button {
+              id: installButton
+              visible: !root.keydPresent
+              text: root.applying ? "Installing..." : "Install & Enable"
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              enabled: !root.applying
+              onClicked: root.installAndEnable()
             }
           }
 
