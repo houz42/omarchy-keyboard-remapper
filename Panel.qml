@@ -32,6 +32,11 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string binDir: Qt.resolvedUrl("bin").toString().replace("file://", "")
   readonly property string rulesPath: Qt.resolvedUrl("rules.json").toString().replace("file://", "")
+  // Gitignored, unlike rules.json -- this plugin's own repo gets `git add -A`
+  // + pushed during development, so anything the popup writes into a
+  // tracked file risks getting swept into a public commit. Rules you add
+  // from the popup live here instead, never in the shipped/tracked file.
+  readonly property string userRulesPath: Qt.resolvedUrl("user-rules.json").toString().replace("file://", "")
   readonly property string keyNamesPath: Qt.resolvedUrl("keyd-keys.json").toString().replace("file://", "")
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 10)))
 
@@ -61,9 +66,33 @@ Panel {
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
 
-  // Rule catalog, loaded from rules.json (see rulesFile below). Each entry:
-  // {id, label, description?, source, holdLayer, tap, defaultEnabled?}.
+  // Rule catalog: shipped/tracked rules.json (read-only from this plugin's
+  // own perspective -- never written by the popup) merged with gitignored
+  // user-rules.json (the popup's own scratch space). Each entry: {id, label,
+  // description?, source, holdLayer, tap, defaultEnabled?}, plus a
+  // runtime-only _removable flag added at merge time (not persisted) so the
+  // UI only offers to remove rules the popup itself can safely delete.
+  property var shippedRules: []
+  property var userRules: []
   property var rules: []
+
+  function recomputeRules() {
+    var shippedIds = {}
+    var merged = root.shippedRules.map(function(r) {
+      shippedIds[r.id] = true
+      return Object.assign({}, r, { _removable: false })
+    })
+    root.userRules.forEach(function(r) {
+      // A shipped rule re-adding the same id (e.g. after a plugin update)
+      // wins over a same-id user rule, so an upstream default can't be
+      // silently shadowed by stale local state.
+      if (shippedIds[r.id]) return
+      merged.push(Object.assign({}, r, { _removable: true }))
+    })
+    root.rules = merged
+    root.syncPendingFile()
+    root.refreshNow()
+  }
 
   // Per-rule on/off state, keyed by rule id -- kept separate from rules.json
   // itself so editing rules.json (adding your own mappings, pulling plugin
@@ -140,32 +169,53 @@ Panel {
     id: rulesFile
     path: root.rulesPath
     watchChanges: true
-    atomicWrites: true
     printErrors: false
-    onLoaded: root.loadRules(text())
+    onLoaded: {
+      root.shippedRules = root.parseRulesJson(text(), "rules.json")
+      root.recomputeRules()
+    }
     onFileChanged: reload()
   }
 
-  function loadRules(text) {
-    var trimmed = String(text || "").trim()
-    if (trimmed === "") return
-    try {
-      var parsed = JSON.parse(trimmed)
-      root.rules = Array.isArray(parsed.rules) ? parsed.rules : []
-    } catch (e) {
-      console.warn("keyboard-remapper: rules.json parse failed:", e)
+  FileView {
+    id: userRulesFile
+    path: root.userRulesPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      root.userRules = root.parseRulesJson(text(), "user-rules.json")
+      root.recomputeRules()
     }
-    root.syncPendingFile()
-    root.refreshNow()
+    onLoadFailed: {
+      // Doesn't exist yet (nothing added from the popup so far) -- treat
+      // as an empty list rather than an error; the file gets created on
+      // the first actual addRule() write.
+      root.userRules = []
+      root.recomputeRules()
+    }
+    onFileChanged: reload()
   }
 
-  // Writes the rule catalog back to rules.json (non-privileged -- it's the
-  // plugin's own file, not a system path). rulesFile's watchChanges then
-  // reloads and re-derives everything else (pending conf, status) from the
-  // new content, so this is the only place that needs to know the file
-  // format.
-  function saveRules(newRules) {
-    rulesFile.setText(JSON.stringify({ rules: newRules }, null, 2) + "\n")
+  function parseRulesJson(text, sourceLabel) {
+    var trimmed = String(text || "").trim()
+    if (trimmed === "") return []
+    try {
+      var parsed = JSON.parse(trimmed)
+      return Array.isArray(parsed.rules) ? parsed.rules : []
+    } catch (e) {
+      console.warn("keyboard-remapper: " + sourceLabel + " parse failed:", e)
+      return []
+    }
+  }
+
+  // Writes the popup-added rule catalog back to user-rules.json -- never to
+  // the shipped/tracked rules.json. userRulesFile's watchChanges then
+  // reloads and re-derives everything else (merged rule list, pending
+  // conf, status) from the new content, so this is the only place that
+  // needs to know the file format.
+  function saveUserRules(newUserRules) {
+    userRulesFile.setText(JSON.stringify({ rules: newUserRules }, null, 2) + "\n")
   }
 
   function slugify(text) {
@@ -208,12 +258,12 @@ Panel {
       tap: tap,
       defaultEnabled: false
     }
-    root.saveRules(root.rules.concat([rule]))
+    root.saveUserRules(root.userRules.concat([rule]))
     return ""
   }
 
   function removeRule(id) {
-    root.saveRules(root.rules.filter(function(r) { return r.id !== id }))
+    root.saveUserRules(root.userRules.filter(function(r) { return r.id !== id }))
     if (persisted.enabledById[id] !== undefined) {
       var next = Object.assign({}, persisted.enabledById)
       delete next[id]
@@ -447,7 +497,7 @@ Panel {
                   id: ruleLabel
                   anchors.left: parent.left
                   anchors.right: removeButton.left
-                  anchors.rightMargin: Style.space(6)
+                  anchors.rightMargin: ruleRow.modelData._removable === true ? Style.space(6) : 0
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(2)
 
@@ -489,8 +539,15 @@ Panel {
                 PanelActionButton {
                   id: removeButton
                   anchors.right: ruleToggle.visible ? ruleToggle.left : parent.right
-                  anchors.rightMargin: ruleToggle.visible ? Style.space(6) : 0
+                  anchors.rightMargin: (visible && ruleToggle.visible) ? Style.space(6) : 0
                   anchors.verticalCenter: parent.verticalCenter
+                  // Only rules added from this popup (user-rules.json) can
+                  // be removed here -- shipped/example rules from the
+                  // tracked rules.json can be toggled off but not deleted
+                  // (deleting one would just come back on the next `git
+                  // pull`/plugin update anyway).
+                  visible: ruleRow.modelData._removable === true
+                  width: visible ? size : 0
                   iconText: "-"
                   tooltipText: "Remove " + (ruleRow.modelData.label || ruleRow.modelData.id)
                   foreground: root.foreground

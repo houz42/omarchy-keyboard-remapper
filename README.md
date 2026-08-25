@@ -46,9 +46,17 @@ label is always auto-generated from the source and tap you picked (e.g.
 "leftalt tap → f13") — there's no separate field for it. Each rule shows a
 **-** button to remove it the same way, no file editing needed either way.
 
-Under the hood, every rule is one entry in [`rules.json`](rules.json), next
-to `Panel.qml`, and hand-editing it directly works too — the popup form
-just writes the same file:
+Rules added from the popup are written to `user-rules.json`, next to
+`Panel.qml` — not to the tracked [`rules.json`](rules.json). This matters
+if you clone this repo yourself: `rules.json` ships the example rule and is
+part of the git history, while `user-rules.json` is gitignored, so your own
+mappings never collide with `git pull`/`omarchy plugin update`, and never
+end up committed if you fork this repo to add your own examples. The two
+files are merged at load time (a shipped rule wins if an id somehow
+collides with a user one); only rules from `user-rules.json` show a **-**
+remove button, since removing a shipped rule would just have it reappear
+on the next update anyway. Hand-editing either file directly works — the
+popup form only ever touches `user-rules.json`:
 
 ```json
 {
@@ -83,7 +91,7 @@ just writes the same file:
   overrides this — editing `rules.json` later never resets a rule you've
   already turned on or off.
 
-Editing `rules.json` by hand hot-reloads — no plugin reload needed, and the
+Editing either file by hand hot-reloads — no plugin reload needed, and the
 popup picks up your changes immediately.
 
 ## Manual use
@@ -99,8 +107,10 @@ bin/apply-keyd-config <pending-conf-path>  # privileged (via pkexec): installs k
 
 ## How it works
 
-The popup renders all enabled rules from `rules.json` into one `keyd`
-config text (`Panel.qml`'s `renderConf()`), keeps a copy of that text
+The rule catalog is `rules.json` (shipped/tracked) merged with
+`user-rules.json` (gitignored, popup-writable) at load time. The popup
+renders all enabled rules from that merged list into one `keyd` config text
+(`Panel.qml`'s `renderConf()`), keeps a copy of that text
 non-privileged under `~/.local/state/omarchy/houz42.keyboard-remapper/`,
 and on every status refresh compares the live `/etc/keyd/*.conf` against
 that copy to detect drift — the read-only status script never needs to know
