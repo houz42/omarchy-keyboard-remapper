@@ -8,36 +8,18 @@ existing Hyprland/app Alt-chord.
 
 ## Why
 
-Terminal multiplexers and multiplexer-like tools — tmux, screen,
-[herdr](https://herdr.dev), and others — all work the same way: you press a
-*prefix* key, release it, then press a command key (`prefix` then `c` for a
-new window/tab, `prefix` then `?` for help, and so on). That prefix has to
-be a single, dedicated key so the tool can tell "you're issuing a command"
-apart from "you're typing normally" — which is why these tools default to
-an *unused* chord like `ctrl+b` or `ctrl+space` rather than a bare modifier:
-software generally can't distinguish "Ctrl held alone, then released" from
-"Ctrl held as part of some other shortcut" using keyboard events alone.
+tmux/screen/[herdr](https://herdr.dev)-style tools need a dedicated
+*prefix* key, which is why they default to an unused chord like `ctrl+b`:
+software can't tell "modifier held alone, then released" apart from
+"modifier held as part of another shortcut." A key already used for other
+shortcuts (like Alt) can't just be reassigned without losing it elsewhere.
 
-A single physical key dedicated to nothing else solves this more naturally
-than a chord — but most keyboards don't have a spare one, and a key you
-already rely on for other shortcuts (like Alt, used constantly for window
-switching and app shortcuts) can't be reassigned to a tool's prefix without
-losing it everywhere else.
-
-`keyd`'s `overload(layer, key)` primitive solves exactly this: it makes one
-physical key do both jobs, based on *how* it's pressed. A tap (press and
-release with nothing else in between) emits a different, otherwise-idle
-key — an unused function key like `F13` — while holding it down and
-pressing something else still acts as the original modifier. This plugin
-wires `leftalt = overload(alt, f13)`, so:
-
-- Tap Alt alone → `F13`, which you point a multiplexer's prefix binding at
-  (e.g. herdr's `prefix = "f13"` in `~/.config/herdr/config.toml`).
-- Hold Alt + anything else → completely unchanged Alt-chord behavior.
-
-This happens at the `keyd`/evdev level, below Hyprland's XKB layer, so it
-works regardless of any XKB-level remaps (e.g. a Win↔Alt swap) already in
-place.
+`keyd`'s `overload(layer, key)` fixes this by making one physical key do
+both jobs based on *how* it's pressed: a standalone tap emits an otherwise
+unused key (e.g. `F13`, point herdr's `prefix` at it), while holding it
+down still acts as the original modifier for every existing shortcut. This
+happens below Hyprland's XKB layer, so it works regardless of any
+XKB-level remaps (e.g. a Win↔Alt swap) already in place.
 
 ![Keyboard Remapper panel](screenshots/panel.png)
 
