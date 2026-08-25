@@ -113,8 +113,22 @@ press. That script installs `keyd` via `pacman` if it's missing, atomically
 writes `/etc/keyd/houz42-keyboard-remapper.conf`, and enables/reloads the
 `keyd` service.
 
+`keyd`'s own stock unit has no `Restart=` directive, and `keyd` 2.6.0 has
+known SIGSEGV crashes on some hardware (multi-device USB receivers, YubiKeys,
+and similar have been observed to trigger it) — with no restart policy, a
+crash leaves the daemon dead (and your remaps silently inert) until
+something manually restarts it. The first apply installs a systemd drop-in
+(`/etc/systemd/system/keyd.service.d/houz42-keyboard-remapper-restart.conf`,
+`Restart=on-failure` / `RestartSec=1`) so a future crash self-heals in about
+a second instead of requiring you to reopen the popup and hit Re-apply.
+
 ## Known limitations
 
+- `keyd` 2.6.0 has known SIGSEGV crashes on some hardware. This plugin
+  installs an auto-restart systemd drop-in on first apply (see "How it
+  works") so a crash recovers on its own, but if you see the bar icon go to
+  "service inactive" repeatedly, check `journalctl -u keyd` for
+  `dumped core` / `SEGV` — that's an upstream `keyd` bug, not this plugin.
 - The popup form can add and remove rules, but not edit an existing one in
   place — remove it and re-add it with the changed fields.
 - `keyd` merges every `*.conf` file under `/etc/keyd/`. If you run another
@@ -135,6 +149,8 @@ To fully remove it:
 
 ```sh
 sudo rm /etc/keyd/houz42-keyboard-remapper.conf
+sudo rm /etc/systemd/system/keyd.service.d/houz42-keyboard-remapper-restart.conf
+sudo systemctl daemon-reload
 sudo systemctl reload keyd || sudo systemctl restart keyd
 # optionally, if nothing else on your system uses keyd:
 sudo systemctl disable --now keyd
