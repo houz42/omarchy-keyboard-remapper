@@ -1,0 +1,46 @@
+#!/bin/bash
+# Privileged apply step for the "Keyboard Remapper" bar-widget plugin.
+# Invoked as: pkexec <this-script> <path-to-a-pending-conf-file>
+# The pending conf is pre-rendered by the non-privileged QML/JS side; this
+# script never receives rule text on argv and never runs a caller-supplied
+# shell string -- its own body is the only thing pkexec elevates.
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/keyd-remapper-lib.sh"
+
+pending="${1:?usage: apply-keyd-config <pending-conf-path>}"
+
+# Refuse anything outside the plugin's own state dir, even though pkexec
+# already fixes which script runs -- belt-and-suspenders against a stray
+# caller passing an unexpected path.
+case "$pending" in
+  "$KEYD_REMAPPER_STATE_DIR"/*) ;;
+  *)
+    echo "apply-keyd-config: refusing path outside $KEYD_REMAPPER_STATE_DIR: $pending" >&2
+    exit 1
+    ;;
+esac
+[[ -f $pending ]] || { echo "apply-keyd-config: no such file: $pending" >&2; exit 1; }
+
+if ! command -v keyd >/dev/null 2>&1; then
+  pacman -S --noconfirm --needed keyd
+fi
+
+install -Dm644 "$pending" "$KEYD_REMAPPER_CONF.tmp"
+mv "$KEYD_REMAPPER_CONF.tmp" "$KEYD_REMAPPER_CONF"
+
+systemctl enable --now keyd
+keyd reload 2>/dev/null || systemctl restart keyd
+
+keyd_version="$(keyd -v 2>/dev/null | head -n1 || true)"
+active="false"
+if systemctl is-active --quiet keyd; then
+  active="true"
+fi
+
+jq -nc \
+  --argjson ok true \
+  --argjson active "$active" \
+  --arg version "$keyd_version" \
+  --arg appliedPath "$KEYD_REMAPPER_CONF" \
+  '{ok: $ok, active: $active, installedVersion: $version, appliedPath: $appliedPath}'

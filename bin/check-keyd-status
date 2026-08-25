@@ -1,0 +1,44 @@
+#!/bin/bash
+# Read-only status collector for the "Keyboard Remapper" bar-widget plugin.
+# Prints one JSON object describing whether keyd is installed/active, and
+# whether the live /etc/keyd config matches what the current rule state
+# should produce. Never mutates anything.
+#
+# Usage: check-keyd-status <alt-tap-f13 enabled: true|false>
+
+source "$(dirname "${BASH_SOURCE[0]}")/keyd-remapper-lib.sh"
+
+enabled="${1:-true}"
+case "$enabled" in
+  true | false) ;;
+  *) enabled="true" ;;
+esac
+
+keyd_present="false"
+if command -v keyd >/dev/null 2>&1; then
+  keyd_present="true"
+fi
+
+keyd_active="false"
+if systemctl is-active --quiet keyd 2>/dev/null; then
+  keyd_active="true"
+fi
+
+expected="$(keyd_remapper_render "$enabled" leftalt alt f13)"
+
+actual=""
+if [[ -f $KEYD_REMAPPER_CONF ]]; then
+  actual="$(cat "$KEYD_REMAPPER_CONF")"
+fi
+
+drift="false"
+if [[ $actual != "$expected" ]]; then
+  drift="true"
+fi
+
+jq -nc \
+  --argjson keydPresent "$keyd_present" \
+  --argjson keydActive "$keyd_active" \
+  --argjson drift "$drift" \
+  --arg confPath "$KEYD_REMAPPER_CONF" \
+  '{keydPresent: $keydPresent, keydActive: $keydActive, drift: $drift, confPath: $confPath}'
