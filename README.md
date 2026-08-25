@@ -34,9 +34,17 @@ and flip the switch to turn it on.
 
 ## Add your own mappings
 
-Click **+ Add rule** in the popup and fill in a source key, hold layer, and
-tap key (label/description are optional) — no file editing needed. Each
-rule shows a **-** button to remove it the same way.
+Click **+ Add rule** in the popup. **Source key**, **Hold layer**, and
+**Tap key** are searchable pickers — type to filter, e.g. typing "alt"
+narrows straight to `leftalt`/`rightalt`. Source and tap are populated from
+`keyd list-keys` (every key name keyd recognizes, bundled as
+[`keyd-keys.json`](keyd-keys.json)); hold layer offers the five built-in
+modifier layers keyd predefines (`alt`, `control`, `shift`, `meta`,
+`altgr`) — custom `[layername]` sections aren't something this form
+generates. Description is the only free-text field, and it's optional. The
+label is always auto-generated from the source and tap you picked (e.g.
+"leftalt tap → f13") — there's no separate field for it. Each rule shows a
+**-** button to remove it the same way, no file editing needed either way.
 
 Under the hood, every rule is one entry in [`rules.json`](rules.json), next
 to `Panel.qml`, and hand-editing it directly works too — the popup form
@@ -56,17 +64,19 @@ just writes the same file:
 
 - `id` — unique, stable string. Used to remember this rule's on/off state
   across restarts, so don't change it once you've toggled the rule.
-- `label` — shown in the popup.
+- `label` — shown in the popup. The form always derives this; hand-editing
+  the file, you can set anything.
 - `description` — optional; shown under the label in place of the raw
   syntax. The raw `source = overload(holdLayer, tap)` line is always
   available on hover, whether or not a description is set.
 - `source` — the physical key to remap, in `keyd`'s naming (e.g. `leftalt`,
-  `rightctrl`, `capslock`). See `keyd`'s own `keys` list:
-  [`man 5 keyd`](https://github.com/rvaiya/keyd/blob/master/docs/keyd.scdoc)
-  or run `keyd -e < /dev/null` on a machine with `keyd` installed.
-- `holdLayer` — what `source` acts as when held with another key (usually
-  the same modifier family as `source` itself, e.g. `alt`, `control`,
-  `shift` — keyd's built-in layer names).
+  `rightctrl`, `capslock`) — any name from
+  [`keyd-keys.json`](keyd-keys.json), or run `keyd list-keys` yourself.
+- `holdLayer` — what `source` acts as when held with another key. Stick to
+  `alt`/`control`/`shift`/`meta`/`altgr` unless you're also hand-writing a
+  custom `[layername]` section elsewhere in `/etc/keyd/` — this plugin's
+  renderer only ever emits single `source = overload(holdLayer, tap)`
+  lines, never layer section headers.
 - `tap` — what a standalone tap of `source` alone emits.
 - `defaultEnabled` — optional (default `false`) shipped on/off state for
   anyone installing fresh. Your own toggle choice, once made, always

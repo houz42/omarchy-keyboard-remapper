@@ -32,7 +32,31 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string binDir: Qt.resolvedUrl("bin").toString().replace("file://", "")
   readonly property string rulesPath: Qt.resolvedUrl("rules.json").toString().replace("file://", "")
+  readonly property string keyNamesPath: Qt.resolvedUrl("keyd-keys.json").toString().replace("file://", "")
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 10)))
+
+  // Valid keyd key names, from `keyd list-keys`, for the source/tap pickers
+  // in the Add-rule form (see keyNamesFile below). Standard modifier layer
+  // names for the hold-layer picker aren't in `keyd list-keys` (they're
+  // implicit, not physical keys) so this list is hand-maintained; it covers
+  // every case Panel.qml's simple one-line-per-rule renderer can produce
+  // (custom `[layername]` sections aren't generated here).
+  property var keyNames: []
+  readonly property var holdLayerNames: ["alt", "control", "shift", "meta", "altgr"]
+
+  FileView {
+    id: keyNamesFile
+    path: root.keyNamesPath
+    printErrors: false
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        root.keyNames = Array.isArray(parsed.keys) ? parsed.keys : []
+      } catch (e) {
+        console.warn("keyboard-remapper: keyd-keys.json parse failed:", e)
+      }
+    }
+  }
 
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
@@ -162,9 +186,11 @@ Panel {
   }
 
   // Validates and appends one rule from the "Add rule" form. Returns an
-  // error string, or "" on success -- source/holdLayer/tap are the only
-  // required fields since they're what actually drives the keyd config;
-  // label/description are cosmetic and get sane fallbacks.
+  // error string, or "" on success. source/holdLayer/tap are required --
+  // they're what actually drives the keyd config. label is always
+  // auto-generated from source+tap (no manual field for it -- it's fully
+  // derivable, so asking for it is one more thing to type for no benefit);
+  // description is the only free-text, optional field.
   function addRule(fields) {
     var source = String(fields.source || "").trim()
     var holdLayer = String(fields.holdLayer || "").trim()
@@ -172,11 +198,10 @@ Panel {
     if (source === "" || holdLayer === "" || tap === "") {
       return "Source, hold layer, and tap key are all required."
     }
-    var label = String(fields.label || "").trim()
     var description = String(fields.description || "").trim()
     var rule = {
       id: root.uniqueRuleId(root.slugify(source + "-" + tap)),
-      label: label !== "" ? label : (source + " tap → " + tap),
+      label: source + " tap → " + tap,
       description: description,
       source: source,
       holdLayer: holdLayer,
@@ -512,11 +537,37 @@ Panel {
                 width: parent.width
                 spacing: Style.space(6)
 
-                TextField { id: labelField; width: parent.width; placeholderText: "Label (optional)"; foreground: root.foreground }
                 TextField { id: descriptionField; width: parent.width; placeholderText: "Description (optional)"; foreground: root.foreground }
-                TextField { id: sourceField; width: parent.width; placeholderText: "Source key, e.g. leftalt"; foreground: root.foreground }
-                TextField { id: holdLayerField; width: parent.width; placeholderText: "Hold layer, e.g. alt"; foreground: root.foreground }
-                TextField { id: tapField; width: parent.width; placeholderText: "Tap key, e.g. f13"; foreground: root.foreground }
+
+                SearchableDropdown {
+                  id: sourceDropdown
+                  width: parent.width
+                  label: "Source key"
+                  placeholderText: "Search keys..."
+                  triggerLabel: "Select source key"
+                  options: root.keyNames
+                  foreground: root.foreground
+                }
+
+                SearchableDropdown {
+                  id: holdLayerDropdown
+                  width: parent.width
+                  label: "Hold layer"
+                  placeholderText: "Search layers..."
+                  triggerLabel: "Select hold layer"
+                  options: root.holdLayerNames
+                  foreground: root.foreground
+                }
+
+                SearchableDropdown {
+                  id: tapDropdown
+                  width: parent.width
+                  label: "Tap key"
+                  placeholderText: "Search keys..."
+                  triggerLabel: "Select tap key"
+                  options: root.keyNames
+                  foreground: root.foreground
+                }
 
                 Row {
                   spacing: Style.space(8)
@@ -531,22 +582,20 @@ Panel {
                     bordered: true
                     onClicked: {
                       var error = root.addRule({
-                        label: labelField.text,
                         description: descriptionField.text,
-                        source: sourceField.text,
-                        holdLayer: holdLayerField.text,
-                        tap: tapField.text
+                        source: sourceDropdown.value,
+                        holdLayer: holdLayerDropdown.value,
+                        tap: tapDropdown.value
                       })
                       if (error !== "") {
                         formError.text = error
                         return
                       }
                       formError.text = ""
-                      labelField.text = ""
                       descriptionField.text = ""
-                      sourceField.text = ""
-                      holdLayerField.text = ""
-                      tapField.text = ""
+                      sourceDropdown.value = ""
+                      holdLayerDropdown.value = ""
+                      tapDropdown.value = ""
                       addRuleForm.visible = false
                     }
                   }
