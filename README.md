@@ -34,7 +34,13 @@ and flip the switch to turn it on.
 
 ## Add your own mappings
 
-Every rule is one entry in [`rules.json`](rules.json), next to `Panel.qml`:
+Click **+ Add rule** in the popup and fill in a source key, hold layer, and
+tap key (label/description are optional) — no file editing needed. Each
+rule shows a **-** button to remove it the same way.
+
+Under the hood, every rule is one entry in [`rules.json`](rules.json), next
+to `Panel.qml`, and hand-editing it directly works too — the popup form
+just writes the same file:
 
 ```json
 {
@@ -67,10 +73,8 @@ Every rule is one entry in [`rules.json`](rules.json), next to `Panel.qml`:
   overrides this — editing `rules.json` later never resets a rule you've
   already turned on or off.
 
-Editing `rules.json` hot-reloads — no plugin reload needed. Adding a rule
-this way is the only option today; an in-panel form for adding/editing
-rules without touching the file is planned but not built yet (see Known
-limitations).
+Editing `rules.json` by hand hot-reloads — no plugin reload needed, and the
+popup picks up your changes immediately.
 
 ## Manual use
 
@@ -101,8 +105,8 @@ writes `/etc/keyd/houz42-keyboard-remapper.conf`, and enables/reloads the
 
 ## Known limitations
 
-- No in-panel UI for adding/editing rules yet — see "Add your own
-  mappings" above; you currently hand-edit `rules.json`. Planned.
+- The popup form can add and remove rules, but not edit an existing one in
+  place — remove it and re-add it with the changed fields.
 - `keyd` merges every `*.conf` file under `/etc/keyd/`. If you run another
   keyd-based remap tool alongside this plugin, make sure neither binds the
   same source key — conflicting lines across files produce ambiguous,

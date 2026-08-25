@@ -116,6 +116,7 @@ Panel {
     id: rulesFile
     path: root.rulesPath
     watchChanges: true
+    atomicWrites: true
     printErrors: false
     onLoaded: root.loadRules(text())
     onFileChanged: reload()
@@ -132,6 +133,67 @@ Panel {
     }
     root.syncPendingFile()
     root.refreshNow()
+  }
+
+  // Writes the rule catalog back to rules.json (non-privileged -- it's the
+  // plugin's own file, not a system path). rulesFile's watchChanges then
+  // reloads and re-derives everything else (pending conf, status) from the
+  // new content, so this is the only place that needs to know the file
+  // format.
+  function saveRules(newRules) {
+    rulesFile.setText(JSON.stringify({ rules: newRules }, null, 2) + "\n")
+  }
+
+  function slugify(text) {
+    return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+  }
+
+  function uniqueRuleId(base) {
+    var candidate = base !== "" ? base : "rule"
+    var existing = {}
+    root.rules.forEach(function(r) { existing[r.id] = true })
+    var id = candidate
+    var n = 2
+    while (existing[id]) {
+      id = candidate + "-" + n
+      n++
+    }
+    return id
+  }
+
+  // Validates and appends one rule from the "Add rule" form. Returns an
+  // error string, or "" on success -- source/holdLayer/tap are the only
+  // required fields since they're what actually drives the keyd config;
+  // label/description are cosmetic and get sane fallbacks.
+  function addRule(fields) {
+    var source = String(fields.source || "").trim()
+    var holdLayer = String(fields.holdLayer || "").trim()
+    var tap = String(fields.tap || "").trim()
+    if (source === "" || holdLayer === "" || tap === "") {
+      return "Source, hold layer, and tap key are all required."
+    }
+    var label = String(fields.label || "").trim()
+    var description = String(fields.description || "").trim()
+    var rule = {
+      id: root.uniqueRuleId(root.slugify(source + "-" + tap)),
+      label: label !== "" ? label : (source + " tap → " + tap),
+      description: description,
+      source: source,
+      holdLayer: holdLayer,
+      tap: tap,
+      defaultEnabled: false
+    }
+    root.saveRules(root.rules.concat([rule]))
+    return ""
+  }
+
+  function removeRule(id) {
+    root.saveRules(root.rules.filter(function(r) { return r.id !== id }))
+    if (persisted.enabledById[id] !== undefined) {
+      var next = Object.assign({}, persisted.enabledById)
+      delete next[id]
+      persisted.enabledById = next
+    }
   }
 
   onOpenedChanged: if (opened) refreshNow()
@@ -289,7 +351,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(300))
+    contentWidth: panel.fittedContentWidth(Style.space(320))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(420))
 
     PanelKeyCatcher {
@@ -354,13 +416,13 @@ Panel {
                 required property var modelData
 
                 width: parent.width
-                height: Math.max(ruleLabel.implicitHeight, ruleToggle.height)
+                height: Math.max(ruleLabel.implicitHeight, ruleToggle.height, removeButton.size)
 
                 Column {
                   id: ruleLabel
                   anchors.left: parent.left
-                  anchors.right: ruleToggle.left
-                  anchors.rightMargin: Style.space(8)
+                  anchors.right: removeButton.left
+                  anchors.rightMargin: Style.space(6)
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(2)
 
@@ -399,6 +461,19 @@ Panel {
                   fontFamily: root.fontFamily
                 }
 
+                PanelActionButton {
+                  id: removeButton
+                  anchors.right: ruleToggle.visible ? ruleToggle.left : parent.right
+                  anchors.rightMargin: ruleToggle.visible ? Style.space(6) : 0
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "-"
+                  tooltipText: "Remove " + (ruleRow.modelData.label || ruleRow.modelData.id)
+                  foreground: root.foreground
+                  hoverColor: Color.urgent
+                  enabled: !root.applying
+                  onClicked: root.removeRule(ruleRow.modelData.id)
+                }
+
                 ToggleSwitch {
                   id: ruleToggle
                   anchors.right: parent.right
@@ -408,6 +483,98 @@ Panel {
                   busy: root.applying
                   foreground: root.foreground
                   onToggled: root.toggleRule(ruleRow.modelData)
+                }
+              }
+            }
+
+            // ---------- Add rule ----------
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                visible: !addRuleForm.visible
+                text: "+ Add rule"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: addRuleForm.visible = true
+                }
+              }
+
+              Column {
+                id: addRuleForm
+                visible: false
+                width: parent.width
+                spacing: Style.space(6)
+
+                TextField { id: labelField; width: parent.width; placeholderText: "Label (optional)"; foreground: root.foreground }
+                TextField { id: descriptionField; width: parent.width; placeholderText: "Description (optional)"; foreground: root.foreground }
+                TextField { id: sourceField; width: parent.width; placeholderText: "Source key, e.g. leftalt"; foreground: root.foreground }
+                TextField { id: holdLayerField; width: parent.width; placeholderText: "Hold layer, e.g. alt"; foreground: root.foreground }
+                TextField { id: tapField; width: parent.width; placeholderText: "Tap key, e.g. f13"; foreground: root.foreground }
+
+                Row {
+                  spacing: Style.space(8)
+
+                  Button {
+                    text: "Add"
+                    fontSize: Style.font.bodySmall
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    horizontalPadding: Style.spacing.controlPaddingX
+                    verticalPadding: Style.spacing.controlPaddingY
+                    bordered: true
+                    onClicked: {
+                      var error = root.addRule({
+                        label: labelField.text,
+                        description: descriptionField.text,
+                        source: sourceField.text,
+                        holdLayer: holdLayerField.text,
+                        tap: tapField.text
+                      })
+                      if (error !== "") {
+                        formError.text = error
+                        return
+                      }
+                      formError.text = ""
+                      labelField.text = ""
+                      descriptionField.text = ""
+                      sourceField.text = ""
+                      holdLayerField.text = ""
+                      tapField.text = ""
+                      addRuleForm.visible = false
+                    }
+                  }
+
+                  Button {
+                    text: "Cancel"
+                    fontSize: Style.font.bodySmall
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    horizontalPadding: Style.spacing.controlPaddingX
+                    verticalPadding: Style.spacing.controlPaddingY
+                    bordered: true
+                    onClicked: {
+                      formError.text = ""
+                      addRuleForm.visible = false
+                    }
+                  }
+                }
+
+                Text {
+                  id: formError
+                  visible: text !== ""
+                  width: parent.width
+                  text: ""
+                  color: root.amber
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
                 }
               }
             }
