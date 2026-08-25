@@ -2,7 +2,7 @@
 
 An [Omarchy](https://omarchy.org/) shell plugin for `keyd` tap/hold
 key-remap rules, toggled from a bar-icon popup. Ships with one example rule
-(off by default): a standalone tap of the physical Alt key emits `F13`,
+(off by default): a standalone tap of the physical Alt key emits `F12`,
 while holding Alt still passes through as a normal modifier for every
 existing Hyprland/app Alt-chord.
 
@@ -16,10 +16,19 @@ shortcuts (like Alt) can't just be reassigned without losing it elsewhere.
 
 `keyd`'s `overload(layer, key)` fixes this by making one physical key do
 both jobs based on *how* it's pressed: a standalone tap emits an otherwise
-unused key (e.g. `F13`, point herdr's `prefix` at it), while holding it
+unused key (e.g. `F12`, point herdr's `prefix` at it), while holding it
 down still acts as the original modifier for every existing shortcut. This
 happens below Hyprland's XKB layer, so it works regardless of any
 XKB-level remaps (e.g. a Win↔Alt swap) already in place.
+
+**Pick the tap target from F1–F12, not F13–F24.** Standard terminal
+emulators encode F13–F24 as the *exact same escape sequence* as Shift+F1
+through Shift+F12 (`kf13` and `kfSF1` are one and the same in terminfo —
+check `infocmp -1 $TERM | grep kf13`) — a decades-old VT220 convention most
+terminal-input libraries still follow. A terminal-hosted app like herdr
+almost always decodes that sequence as "Shift+F1", never as "F13", so a
+`prefix = "f13"`-style binding can silently never fire no matter how
+correctly `keyd` is configured. F1–F12 don't have this collision.
 
 ![Keyboard Remapper panel](screenshots/panel.png)
 
@@ -43,7 +52,7 @@ modifier layers keyd predefines (`alt`, `control`, `shift`, `meta`,
 `altgr`) — custom `[layername]` sections aren't something this form
 generates. Description is the only free-text field, and it's optional. The
 label is always auto-generated from the source and tap you picked (e.g.
-"leftalt tap → f13") — there's no separate field for it. Each rule shows a
+"leftalt tap → f12") — there's no separate field for it. Each rule shows a
 **-** button to remove it the same way, no file editing needed either way.
 
 Rules added from the popup are written to `user-rules.json`, next to
@@ -60,12 +69,12 @@ popup form only ever touches `user-rules.json`:
 
 ```json
 {
-  "id": "alt-tap-f13",
-  "label": "Alt tap → F13",
+  "id": "alt-tap-f12",
+  "label": "Alt tap → F12",
   "description": "For herdr / tmux-style app prefixes",
   "source": "leftalt",
   "holdLayer": "alt",
-  "tap": "f13",
+  "tap": "f12",
   "defaultEnabled": false
 }
 ```
@@ -85,7 +94,9 @@ popup form only ever touches `user-rules.json`:
   custom `[layername]` section elsewhere in `/etc/keyd/` — this plugin's
   renderer only ever emits single `source = overload(holdLayer, tap)`
   lines, never layer section headers.
-- `tap` — what a standalone tap of `source` alone emits.
+- `tap` — what a standalone tap of `source` alone emits. If you're pointing
+  this at a terminal-hosted app's prefix binding, prefer `f1`–`f12` — see
+  the F13–F24/Shift-F1–F12 collision note in "Why" above.
 - `defaultEnabled` — optional (default `false`) shipped on/off state for
   anyone installing fresh. Your own toggle choice, once made, always
   overrides this — editing `rules.json` later never resets a rule you've
@@ -134,6 +145,10 @@ a second instead of requiring you to reopen the popup and hit Re-apply.
 
 ## Known limitations
 
+- If your `tap` target is meant to reach a terminal-hosted app (herdr,
+  tmux, etc.), avoid F13–F24 — see "Why" above for the Shift-F1–F12
+  collision. This isn't fixable in `keyd`/this plugin; it's how terminal
+  emulators encode those keys.
 - `keyd` 2.6.0 has known SIGSEGV crashes on some hardware. This plugin
   installs an auto-restart systemd drop-in on first apply (see "How it
   works") so a crash recovers on its own, but if you see the bar icon go to
