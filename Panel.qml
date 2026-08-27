@@ -101,6 +101,15 @@ Panel {
     id: persisted
     reloadableId: "houz42.keyboard-remapper.rules"
     property var enabledById: ({})
+    // Restoring enabledById from disk is async and races rulesFile/
+    // userRulesFile loading -- if recomputeRules() already ran (and
+    // rendered pendingPath) before this restore lands, pendingPath is
+    // stuck reflecting the default-disabled state while the real /etc/keyd
+    // conf still has the previously-applied rules, which check-keyd-status
+    // then reports as permanent drift. Re-syncing here whenever the
+    // restored (or toggled) state actually changes keeps pendingPath
+    // truthful regardless of load order.
+    onEnabledByIdChanged: root.recomputeRules()
   }
 
   function isRuleEnabled(rule) {
