@@ -97,31 +97,57 @@ Panel {
   // Per-rule on/off state, keyed by rule id -- kept separate from rules.json
   // itself so editing rules.json (adding your own mappings, pulling plugin
   // updates) never clobbers what you've toggled on/off, and vice versa.
-  PersistentProperties {
-    id: persisted
-    reloadableId: "houz42.keyboard-remapper.rules"
-    property var enabledById: ({})
-    // Restoring enabledById from disk is async and races rulesFile/
-    // userRulesFile loading -- if recomputeRules() already ran (and
-    // rendered pendingPath) before this restore lands, pendingPath is
-    // stuck reflecting the default-disabled state while the real /etc/keyd
-    // conf still has the previously-applied rules, which check-keyd-status
-    // then reports as permanent drift. Re-syncing here whenever the
-    // restored (or toggled) state actually changes keeps pendingPath
-    // truthful regardless of load order.
-    onEnabledByIdChanged: root.recomputeRules()
-  }
+  //
+  // Backed by a plain JSON file in the plugin's state dir rather than
+  // Quickshell's PersistentProperties. PersistentProperties (a Reloadable)
+  // only survives an in-process QML hot-reload -- it does NOT survive a
+  // full quickshell process restart (e.g. `omarchy restart shell`, which
+  // kills and respawns the process). Across a real restart it silently
+  // reset to {}, so isRuleEnabled() fell back to defaultEnabled (false)
+  // even though /etc/keyd still had the rule applied from before the
+  // restart -- surfacing as permanent "config drift", and pressing Apply
+  // at that point would have silently turned the remap off instead of
+  // restoring it.
+  readonly property string enabledStatePath: root.stateDir + "/enabled-state.json"
+  property var enabledById: ({})
 
   function isRuleEnabled(rule) {
-    var stored = persisted.enabledById[rule.id]
+    var stored = root.enabledById[rule.id]
     if (stored !== undefined) return stored === true
     return rule.defaultEnabled === true
   }
 
   function setRuleEnabled(id, enabled) {
-    var next = Object.assign({}, persisted.enabledById)
+    var next = Object.assign({}, root.enabledById)
     next[id] = enabled
-    persisted.enabledById = next
+    root.enabledById = next
+    enabledStateFile.setText(JSON.stringify(next, null, 2) + "\n")
+    root.recomputeRules()
+  }
+
+  FileView {
+    id: enabledStateFile
+    path: root.enabledStatePath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        root.enabledById = (parsed && typeof parsed === "object") ? parsed : {}
+      } catch (e) {
+        console.warn("keyboard-remapper: enabled-state.json parse failed:", e)
+        root.enabledById = {}
+      }
+      root.recomputeRules()
+    }
+    onLoadFailed: {
+      // Doesn't exist yet (no rule ever toggled) -- treat as empty rather
+      // than an error; the file gets created on the first setRuleEnabled().
+      root.enabledById = {}
+      root.recomputeRules()
+    }
+    onFileChanged: reload()
   }
 
   // Fires a single notify-send the first time this plugin ever observes
@@ -273,10 +299,11 @@ Panel {
 
   function removeRule(id) {
     root.saveUserRules(root.userRules.filter(function(r) { return r.id !== id }))
-    if (persisted.enabledById[id] !== undefined) {
-      var next = Object.assign({}, persisted.enabledById)
+    if (root.enabledById[id] !== undefined) {
+      var next = Object.assign({}, root.enabledById)
       delete next[id]
-      persisted.enabledById = next
+      root.enabledById = next
+      enabledStateFile.setText(JSON.stringify(next, null, 2) + "\n")
     }
   }
 
