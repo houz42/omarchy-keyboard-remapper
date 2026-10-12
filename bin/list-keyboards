@@ -11,6 +11,10 @@
 
 set -euo pipefail
 
+# Without udevadm the keyboard classification below silently matches
+# nothing and the picker shows an empty list with no hint why.
+command -v udevadm >/dev/null 2>&1 || { echo "list-keyboards: udevadm not found" >&2; printf '[]\n'; exit 1; }
+
 shopt -s nullglob
 entries=()
 declare -A seen=()

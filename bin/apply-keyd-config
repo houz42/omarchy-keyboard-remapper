@@ -12,7 +12,9 @@ pending="${1:?usage: apply-keyd-config <pending-conf-path>}"
 
 # Refuse anything outside the plugin's own state dir, even though pkexec
 # already fixes which script runs -- belt-and-suspenders against a stray
-# caller passing an unexpected path.
+# caller passing an unexpected path. Canonicalize first: the plain glob
+# match would wave ".."-smuggled paths straight through.
+pending="$(realpath -m "$pending")"
 case "$pending" in
   "$KEYD_REMAPPER_STATE_DIR"/*) ;;
   *)
@@ -21,6 +23,13 @@ case "$pending" in
     ;;
 esac
 [[ -f $pending ]] || { echo "apply-keyd-config: no such file: $pending" >&2; exit 1; }
+
+# Fail loudly on missing tools BEFORE anything mutates /etc/keyd -- jq in
+# particular is the success-signal writer at the very end, so its absence
+# would report failure for an apply that actually succeeded.
+for cmd in jq awk; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "apply-keyd-config: required tool missing: $cmd" >&2; exit 1; }
+done
 
 # Install a dedicated polkit action for this script so the auth dialog
 # shows OUR description instead of generic exec text. NOTE: auth_admin_keep
@@ -81,7 +90,7 @@ while IFS= read -r line || [[ -n $line ]]; do
     scope="${BASH_REMATCH[1]}"
     if [[ $scope == "*" ]]; then
       name="$KEYD_REMAPPER_CONF_NAME"
-    elif [[ $scope =~ ^[0-9a-f]{4}:[0-9a-f]{4}(\+[0-9a-f]{4}:[0-9a-f]{4})*$ ]]; then
+    elif [[ $scope =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(\+[0-9a-fA-F]{4}:[0-9a-fA-F]{4})*$ ]]; then
       name="${KEYD_REMAPPER_CONF_PREFIX}_${scope}.conf"
     else
       echo "apply-keyd-config: malformed scope token in blob: $scope" >&2
@@ -93,6 +102,14 @@ while IFS= read -r line || [[ -n $line ]]; do
   [[ -n $current ]] || { echo "apply-keyd-config: blob does not start with a scope marker" >&2; exit 1; }
   printf '%s\n' "$line" >> "$current"
 done < "$pending"
+
+# An empty or marker-less blob yields ZERO chunks (the in-loop guard above
+# never fires) and the prune step below would then delete every managed
+# file -- refuse instead of wiping the whole config.
+if ((${#chunk_names[@]} == 0)); then
+  echo "apply-keyd-config: blob contains no scope chunks" >&2
+  exit 1
+fi
 
 # Validate EVERY chunk with `keyd check` before touching the live set.
 # `keyd check` exits non-zero on ANY warning, including the idiomatic
@@ -137,10 +154,17 @@ for name in "${chunk_names[@]}"; do
   mv "/etc/keyd/$name.tmp" "/etc/keyd/$name"
 done
 
+# Prune stale managed files. The glob alone would also catch hand-made
+# files like houz42-keyboard-remapper_notes.conf -- restrict deletion to
+# the exact shapes this script generates (the global name, or prefix +
+# validated hex scope), nothing else.
 shopt -s nullglob
 for existing in "/etc/keyd/$KEYD_REMAPPER_CONF_NAME" "/etc/keyd/${KEYD_REMAPPER_CONF_PREFIX}_"*.conf; do
   [[ -e $existing ]] || continue
   base="$(basename "$existing")"
+  if [[ $base != "$KEYD_REMAPPER_CONF_NAME" && ! $base =~ ^${KEYD_REMAPPER_CONF_PREFIX}_[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(\+[0-9a-fA-F]{4}:[0-9a-fA-F]{4})*\.conf$ ]]; then
+    continue
+  fi
   keep="false"
   for name in "${chunk_names[@]}"; do
     [[ $name == "$base" ]] && keep="true" && break

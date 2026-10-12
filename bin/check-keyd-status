@@ -35,10 +35,18 @@ fi
 # comment lines are stripped from BOTH sides before diffing: they carry no
 # semantics, and a live set written by an older plugin version (pre-marker
 # format) must not read as drifted when the rules are unchanged.
+# Only files of the exact shapes the apply script generates count as
+# managed -- a hand-made houz42-keyboard-remapper_notes.conf must not
+# become permanent drift.
 shopt -s nullglob
 managed=()
 for f in "/etc/keyd/$KEYD_REMAPPER_CONF_NAME" "/etc/keyd/${KEYD_REMAPPER_CONF_PREFIX}_"*.conf; do
-  [[ -e $f ]] && managed+=("$f")
+  [[ -e $f ]] || continue
+  base="$(basename "$f")"
+  if [[ $base != "$KEYD_REMAPPER_CONF_NAME" && ! $base =~ ^${KEYD_REMAPPER_CONF_PREFIX}_[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(\+[0-9a-fA-F]{4}:[0-9a-fA-F]{4})*\.conf$ ]]; then
+    continue
+  fi
+  managed+=("$f")
 done
 actual=""
 if ((${#managed[@]})); then

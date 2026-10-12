@@ -103,14 +103,16 @@ Panel {
   }
 
   // Human label for a scope key: device names when currently seen, raw ids
-  // otherwise. Shared by the scope tabs and the add-form preset.
+  // otherwise. Shared by the scope tabs and the add-form preset. Ids are
+  // matched case-insensitively (hand-edited rules may carry uppercase ids).
   function scopeLabel(key) {
     var ids = key.split("+")
     var names = []
     for (var i = 0; i < ids.length; i++) {
       var found = ""
+      var want = ids[i].toLowerCase()
       for (var j = 0; j < root.keyboards.length; j++) {
-        if (root.keyboards[j].id === ids[i]) { found = root.keyboards[j].name; break }
+        if (root.keyboards[j].id === want) { found = root.keyboards[j].name; break }
       }
       names.push(found !== "" ? found : ids[i])
     }
@@ -175,7 +177,9 @@ Panel {
     return root.rules.filter(function(r) { return root.scopeKey(r) === scope })
   }
 
-  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
+  // Honor XDG_STATE_HOME exactly like the bin scripts do (keyd-remapper-lib.sh);
+  // a hardcoded ~/.local/state here would split the state when a user sets it.
+  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") !== "" ? Quickshell.env("XDG_STATE_HOME") : Quickshell.env("HOME") + "/.local/state") + "/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
   readonly property string userRulesPath: root.stateDir + "/user-rules.json"
   readonly property string migrationPath: root.stateDir + "/pending-migration.json"
@@ -291,11 +295,12 @@ Panel {
     onFileChanged: reload()
   }
 
-  // Fires a single notify-send the first time this plugin ever observes
-  // keyd missing, so the user has a nudge to open the popup -- never used
-  // to trigger the pkexec install itself, only ever an explicit button
-  // press does that. Survives reloads/restarts (see SKILL.md's
-  // one-time-ever-trigger pattern), so it fires at most once ever.
+  // Fires a single notify-send the first time this plugin observes keyd
+  // missing in a shell process lifetime, so the user has a nudge to open
+  // the popup -- never used to trigger the pkexec install itself, only
+  // ever an explicit button press does that. PersistentProperties survives
+  // hot-reloads but NOT a full shell restart (see enabledById's comment),
+  // so this may fire once per shell process, not once ever -- acceptable.
   PersistentProperties {
     id: installPrompted
     reloadableId: "houz42.keyboard-remapper.install-prompt"
@@ -303,6 +308,7 @@ Panel {
   }
 
   property bool ready: false
+  property bool statusFailed: false
   property bool keydPresent: false
   property bool keydActive: false
   property bool drift: false
@@ -315,6 +321,7 @@ Panel {
 
   function heroMeta() {
     if (root.applying) return "Applying..."
+    if (root.statusFailed) return "Status check failed"
     if (!root.keydPresent) return "keyd not installed"
     if (!root.keydActive) return "keyd installed, service inactive"
     if (root.drift) return "Config drifted from expected"
@@ -338,11 +345,13 @@ Panel {
   // field is an overload (schema back-compat).
   // A rule's device scope: absent/empty `devices` = global. The scope key
   // is the sorted id list joined by "+", so two rules written with the
-  // same device set in different orders share a chunk.
+  // same device set in different orders share a chunk. Ids are lowercased
+  // here so hand-edited rules (e.g. an uppercase vid:pid from lsusb) can't
+  // produce a scope token the apply script's validation would reject.
   function scopeKey(rule) {
     var d = rule.devices
     if (!d || d.length === 0) return "*"
-    return d.slice().sort().join("+")
+    return d.map(function(x) { return String(x).toLowerCase() }).sort().join("+")
   }
 
   // Rendered blob = one chunk per device scope. Each chunk is a complete
@@ -445,7 +454,7 @@ Panel {
   // duplicate.
   function ruleScope(rule) {
     var d = rule.devices
-    return (d && d.length > 0) ? d : ["*"]
+    return (d && d.length > 0) ? d.map(function(x) { return String(x).toLowerCase() }) : ["*"]
   }
 
   function scopesOverlap(a, b) {
@@ -636,9 +645,12 @@ Panel {
   // Removing a USER rule deletes it from user-rules.json; removing a
   // SHIPPED rule hides it via state (rules.json is read-only and a deleted
   // rule would return on the next plugin update). Either way its toggle
-  // state is dropped, and if it belonged to a pending migration the whole
-  // migration cancels (its XKB options stay active).
+  // state is dropped. Removing a rule that belongs to a PENDING migration
+  // cancels the whole migration AND its sibling rules -- a half-migrated
+  // set must not apply next to the still-active XKB option (double-map).
   function removeRule(id) {
+    var mig = root.pendingXkbMigration
+    var cancelling = mig && mig.ruleIds && mig.ruleIds.indexOf(id) !== -1
     var shipped = false
     for (var i = 0; i < root.shippedRules.length; i++) {
       if (root.shippedRules[i].id === id) { shipped = true; break }
@@ -649,7 +661,10 @@ Panel {
       hiddenShippedFile.setText(JSON.stringify(hidden, null, 2) + "\n")
       root.recomputeRules()
     } else {
-      root.saveUserRules(root.userRules.filter(function(r) { return r.id !== id }))
+      var dropIds = {}
+      dropIds[id] = true
+      if (cancelling) mig.ruleIds.forEach(function(rid) { dropIds[rid] = true })
+      root.saveUserRules(root.userRules.filter(function(r) { return !dropIds[r.id] }))
     }
     if (root.enabledById[id] !== undefined) {
       var next = Object.assign({}, root.enabledById)
@@ -657,8 +672,7 @@ Panel {
       root.enabledById = next
       enabledStateFile.setText(JSON.stringify(next, null, 2) + "\n")
     }
-    var mig = root.pendingXkbMigration
-    if (mig && mig.ruleIds && mig.ruleIds.indexOf(id) !== -1) {
+    if (cancelling) {
       root.setPendingMigration(null)
       root.lastMessage = "Pending migration cancelled; its XKB options stay active."
     }
@@ -713,15 +727,25 @@ Panel {
 
   function applyStatus(text) {
     var trimmed = String(text || "").trim()
-    if (trimmed === "") return
+    if (trimmed === "") {
+      // Empty collector output (script error, jq missing) must NOT leave
+      // the icon permanently invisible (visible: root.ready) -- render an
+      // error state instead of vanishing silently.
+      root.ready = true
+      root.statusFailed = true
+      return
+    }
     var payload
     try {
       payload = JSON.parse(trimmed)
     } catch (e) {
       console.warn("keyboard-remapper: status collector printed invalid JSON")
+      root.ready = true
+      root.statusFailed = true
       return
     }
     root.ready = true
+    root.statusFailed = false
     root.keydPresent = payload.keydPresent === true
     root.keydActive = payload.keydActive === true
     root.drift = payload.drift === true
@@ -785,18 +809,18 @@ Panel {
     "altwin:swap_alt_win":   { label: "Swap Alt ⇄ Super (both sides)", swaps: [["leftalt", "leftmeta"], ["rightalt", "rightmeta"]] },
     "altwin:swap_lalt_lwin": { label: "Swap Left Alt ⇄ Left Super",    swaps: [["leftalt", "leftmeta"]] },
     "altwin:meta_alt":       { label: "Alt keys act as Super",         maps:  [["leftalt", "leftmeta"], ["rightalt", "rightmeta"]] },
-    "altwin:ctrl_win":       { label: "Win keys act as Ctrl",          maps:  [["leftmeta", "leftctrl"], ["rightmeta", "rightctrl"]] },
+    "altwin:ctrl_win":       { label: "Win keys act as Ctrl",          maps:  [["leftmeta", "leftcontrol"], ["rightmeta", "rightcontrol"]] },
     "caps:escape":           { label: "CapsLock acts as Escape",       maps:  [["capslock", "escape"]] },
     "caps:swapescape":       { label: "Swap CapsLock ⇄ Escape",        swaps: [["capslock", "escape"]] },
-    "caps:ctrl_modifier":    { label: "CapsLock is an extra Ctrl",     maps:  [["capslock", "leftctrl"]] },
+    "caps:ctrl_modifier":    { label: "CapsLock is an extra Ctrl",     maps:  [["capslock", "leftcontrol"]] },
     "caps:super":            { label: "CapsLock is an extra Super",    maps:  [["capslock", "leftmeta"]] },
-    "ctrl:swap_lwin_lctl":   { label: "Swap Left Super ⇄ Left Ctrl",   swaps: [["leftmeta", "leftctrl"]] },
-    "ctrl:swap_rwin_rctl":   { label: "Swap Right Super ⇄ Right Ctrl", swaps: [["rightmeta", "rightctrl"]] }
+    "ctrl:swap_lwin_lctl":   { label: "Swap Left Super ⇄ Left Ctrl",   swaps: [["leftmeta", "leftcontrol"]] },
+    "ctrl:swap_rwin_rctl":   { label: "Swap Right Super ⇄ Right Ctrl", swaps: [["rightmeta", "rightcontrol"]] }
   })
 
   // Representative evdev key for each hold layer's modifier output -- what
   // the compositor actually sees pressed while the rule is held.
-  readonly property var holdLayerKeys: ({ "alt": "leftalt", "control": "leftctrl", "shift": "leftshift", "meta": "leftmeta", "altgr": "rightalt" })
+  readonly property var holdLayerKeys: ({ "alt": "leftalt", "control": "leftcontrol", "shift": "leftshift", "meta": "leftmeta", "altgr": "rightalt" })
 
   // key-as-emitted -> key-as-seen-by-the-compositor, derived from the live
   // options. Rebuilt whenever xkbOptionsRaw changes.
@@ -897,6 +921,10 @@ Panel {
             if (payload.chezmoi === "readded") msg += " (chezmoi re-added)"
             else if (payload.chezmoi === "template-skipped") msg += " — chezmoi TEMPLATE source not updated, edit it by hand"
             else if (payload.chezmoi === "readd-failed") msg += " — chezmoi re-add FAILED, run 'chezmoi re-add' yourself"
+            // Migration phase 2 only completes HERE: clearing earlier (at
+            // the keyd apply) would strand a failed XKB write with no
+            // retry. Any later successful apply re-dispatches the removal.
+            if (root.pendingXkbMigration) root.setPendingMigration(null)
           } else {
             msg = "XKB update failed: " + (payload.error || "unknown error")
           }
@@ -1106,13 +1134,15 @@ Panel {
           root.lastMessage = detail !== "" ? ("Apply failed: " + detail) : "Apply failed — see notification."
         }
         // Migration phase 2: the XKB options come out ONLY after the keyd
-        // side is live. On failure/cancel NOTHING rolls back -- the pending
-        // migration is persisted, the drift banner's Re-apply is the retry
-        // path, and phase 2 fires on whichever apply eventually succeeds.
+        // side is live. The pending migration is cleared ONLY when the XKB
+        // write itself succeeds (see xkbSetProcess) -- a failed phase 2
+        // keeps it pending so the next successful apply retries, instead of
+        // leaving a silent double-map with no in-UI recovery. A failed or
+        // cancelled phase-1 apply rolls nothing back either: Re-apply is
+        // the retry path.
         var mig = root.pendingXkbMigration
         if (mig) {
           if (ok) {
-            root.setPendingMigration(null)
             root.removeXkbOptions(mig.tokens)
           } else {
             root.lastMessage = "Migration pending: rules kept, XKB options still active. Use Re-apply to finish. " + root.lastMessage
@@ -1364,7 +1394,7 @@ Panel {
                   id: ruleLabel
                   anchors.left: parent.left
                   anchors.right: removeButton.left
-                  anchors.rightMargin: ruleRow.modelData._removable === true ? Style.space(6) : 0
+                  anchors.rightMargin: ruleToggle.visible ? Style.space(6) : 0
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(2)
 

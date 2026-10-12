@@ -123,7 +123,7 @@ popup picks up your changes immediately.
 ## Manual use
 
 Toggle rules and see live status from the bar icon's popup — there's no
-separate CLI. The two bundled scripts are used internally by the plugin:
+separate CLI. The bundled scripts are used internally by the plugin:
 
 ```sh
 bin/check-keyd-status <expected-conf-path> # read-only status/drift JSON, non-privileged
@@ -281,10 +281,11 @@ generic exec text.)
   `dumped core` / `SEGV` — that's an upstream `keyd` bug, not this plugin.
 - The popup form can add and remove rules, but not edit an existing one in
   place — remove it and re-add it with the changed fields.
-- `keyd` merges every `*.conf` file under `/etc/keyd/`. If you run another
-  keyd-based remap tool alongside this plugin, make sure neither binds the
-  same source key — conflicting lines across files produce ambiguous,
-  load-order-dependent behavior.
+- keyd applies exactly ONE config per device (an explicit `[ids]` match
+  beats the wildcard) — there is no cross-file merging. If you run another
+  keyd-based remap tool alongside this plugin, the same-device file with
+  the more specific `[ids]` wins and the other's rules silently stop
+  applying to that keyboard.
 - Uses Omarchy's internal shell components (`qs.Ui` / `qs.Commons`), which
   aren't a documented stable plugin API and could change without notice.
 
@@ -293,19 +294,26 @@ generic exec text.)
 Disabling or removing the plugin (`omarchy plugin disable houz42.keyboard-remapper`
 / `omarchy plugin remove houz42.keyboard-remapper`) does **not** touch
 anything outside the plugin directory — it leaves `keyd` installed, its
-service enabled, and `/etc/keyd/houz42-keyboard-remapper.conf` in place, so
-any rules you'd enabled keep working even after the plugin itself is gone.
-To fully remove it:
+service enabled, and every `/etc/keyd/houz42-keyboard-remapper*.conf` in
+place (the global file plus one per device scope), so any rules you'd
+enabled keep working even after the plugin itself is gone. To fully remove it:
 
 ```sh
-sudo rm /etc/keyd/houz42-keyboard-remapper.conf
+sudo rm /etc/keyd/houz42-keyboard-remapper*.conf
 sudo rm /etc/systemd/system/keyd.service.d/houz42-keyboard-remapper-restart.conf
+sudo rm /usr/share/polkit-1/actions/com.houz42.keyboard-remapper.apply.policy
 sudo systemctl daemon-reload
 sudo systemctl reload keyd || sudo systemctl restart keyd
+rm -rf ~/.local/state/omarchy/houz42.keyboard-remapper
+# any *.kbremapper.bak backups of your Hyprland config can go too:
+# rm -f ~/.config/hypr/*.kbremapper.bak
 # optionally, if nothing else on your system uses keyd:
 sudo systemctl disable --now keyd
 sudo pacman -R keyd
 ```
+
+Note that `kb_options` edits the plugin made (removals/migrations) are
+changes to YOUR Hyprland config and are not reverted by uninstalling.
 
 ## License
 
