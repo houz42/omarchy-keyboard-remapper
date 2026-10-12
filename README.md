@@ -43,17 +43,23 @@ and flip the switch to turn it on.
 
 ## Add your own mappings
 
-Click **+ Add rule** in the popup. **Source key**, **Hold layer**, and
-**Tap key** are searchable pickers — type to filter, e.g. typing "alt"
-narrows straight to `leftalt`/`rightalt`. Source and tap are populated from
-`keyd list-keys` (every key name keyd recognizes, bundled as
+Click **+ Add rule** in the popup. **Rule type** picks the shape:
+`overload` (tap/hold, the default), `map` (one-way `source = target`), or
+`swap` (bidirectional, both bindings from one rule). **Source key**,
+**Hold layer**/**Tap key** (overload) or **Target key** (map/swap) are
+searchable pickers — type to filter, e.g. typing "alt" narrows straight to
+`leftalt`/`rightalt`. Source and tap/target are populated from `keyd
+list-keys` (every key name keyd recognizes, bundled as
 [`keyd-keys.json`](keyd-keys.json)); hold layer offers the five built-in
 modifier layers keyd predefines (`alt`, `control`, `shift`, `meta`,
 `altgr`) — custom `[layername]` sections aren't something this form
-generates. Description is the only free-text field, and it's optional. The
-label is always auto-generated from the source and tap you picked (e.g.
-"leftalt tap → f12") — there's no separate field for it. Each rule shows a
-**-** button to remove it the same way, no file editing needed either way.
+generates. **Device** scopes the rule to one keyboard (default: global,
+all keyboards) — see "How it works" for how scoped rules become separate
+keyd configs. Description is the only free-text field, and it's optional.
+The label is always auto-generated from the keys you picked (e.g.
+"leftalt tap → f12", "leftalt ⇄ leftmeta") — there's no separate field for
+it. Each rule shows a **-** button to remove it the same way, no file
+editing needed either way.
 
 Rules added from the popup are written to `user-rules.json`, next to
 `Panel.qml` — not to the tracked [`rules.json`](rules.json). This matters
@@ -97,6 +103,12 @@ popup form only ever touches `user-rules.json`:
 - `tap` — what a standalone tap of `source` alone emits. If you're pointing
   this at a terminal-hosted app's prefix binding, prefer `f1`–`f12` — see
   the F13–F24/Shift-F1–F12 collision note in "Why" above.
+- `type` — optional (default `"overload"`). `"map"` renders `source =
+  target`, `"swap"` renders both directions; both take `target` instead of
+  `holdLayer`/`tap`.
+- `devices` — optional array of `vid:pid` ids (see `keyd monitor` or the
+  form's device picker) scoping the rule to those keyboards. Absent/empty
+  = global (`[ids] *`).
 - `defaultEnabled` — optional (default `false`) shipped on/off state for
   anyone installing fresh. Your own toggle choice, once made, always
   overrides this — editing `rules.json` later never resets a rule you've
@@ -123,15 +135,30 @@ The rule catalog is `rules.json` (shipped/tracked) merged with
 renders all enabled rules from that merged list into one `keyd` config text
 (`Panel.qml`'s `renderConf()`), keeps a copy of that text
 non-privileged under `~/.local/state/omarchy/houz42.keyboard-remapper/`,
-and on every status refresh compares the live `/etc/keyd/*.conf` against
+and on every status refresh compares the live `/etc/keyd/` set against
 that copy to detect drift — the read-only status script never needs to know
-what a "rule" is, it just diffs two files.
+what a "rule" is, it just diffs two blobs.
+
+**Per-device rules.** A rule is global by default; the add-rule form's
+device dropdown scopes it to one keyboard. Rules group by scope into
+separate keyd configs at apply time: the global scope installs as
+`/etc/keyd/houz42-keyboard-remapper.conf`, device scopes as
+`houz42-keyboard-remapper_<vid:pid>.conf` (which sorts after the global
+file, so device bindings override global ones for the same key — keyd
+merges every matching file per device, later files winning). The rendered
+blob carries one chunk per scope headed by a `### ... scope:` comment
+(keyd ignores it; it's installed with the chunk), which is what lets the
+drift check stay a dumb byte-diff. Scoping a rule to a device that no
+longer exists just leaves an inert conf file for that id — nothing breaks
+on other keyboards.
 
 Applying a change runs `bin/apply-keyd-config` through a single fixed-argv
 `pkexec` call — never a `pkexec bash -c "..."`/`pkexec python3 -c "..."`
 string, and never triggered automatically, only from an explicit button
-press. That script installs `keyd` via `pacman` if it's missing, atomically
-writes `/etc/keyd/houz42-keyboard-remapper.conf`, and enables/reloads the
+press. That script installs `keyd` via `pacman` if it's missing, validates
+every chunk with `keyd check` (refusing anything with real diagnostics so
+a dead rule never reaches `/etc/keyd`), atomically installs the scope
+files, prunes stale ones from earlier applies, and enables/reloads the
 `keyd` service.
 
 `keyd`'s own stock unit has no `Restart=` directive, and `keyd` 2.6.0 has

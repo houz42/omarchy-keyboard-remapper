@@ -7,7 +7,13 @@
 
 set -u
 
-KEYD_REMAPPER_CONF="/etc/keyd/houz42-keyboard-remapper.conf"
+# Managed conf naming: the global scope keeps the legacy unsuffixed file;
+# per-device scopes get <prefix>_<vid:pid[+vid:pid]>.conf, which sorts
+# AFTER the global file, so keyd (lexical order) lets device-specific
+# bindings override global ones for the same key.
+KEYD_REMAPPER_CONF_NAME="houz42-keyboard-remapper.conf"
+KEYD_REMAPPER_CONF_PREFIX="houz42-keyboard-remapper"
+KEYD_REMAPPER_CONF="/etc/keyd/$KEYD_REMAPPER_CONF_NAME"
 
 # pkexec resets $HOME to the target user's home (root's, i.e. /root), not the
 # invoking user's -- using plain $HOME here would make apply-keyd-config

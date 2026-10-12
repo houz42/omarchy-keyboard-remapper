@@ -29,10 +29,27 @@ if [[ -f $expected_path ]]; then
   expected="$(cat "$expected_path")"
 fi
 
+# The live side is the whole managed set (global file + any per-device
+# scope files), concatenated in LC_ALL=C filename order -- the same order
+# the renderer emits chunks in, so a byte-diff is meaningful. Scope-marker
+# comment lines are stripped from BOTH sides before diffing: they carry no
+# semantics, and a live set written by an older plugin version (pre-marker
+# format) must not read as drifted when the rules are unchanged.
+shopt -s nullglob
+managed=()
+for f in "/etc/keyd/$KEYD_REMAPPER_CONF_NAME" "/etc/keyd/${KEYD_REMAPPER_CONF_PREFIX}_"*.conf; do
+  [[ -e $f ]] && managed+=("$f")
+done
 actual=""
-if [[ -f $KEYD_REMAPPER_CONF ]]; then
-  actual="$(cat "$KEYD_REMAPPER_CONF")"
+if ((${#managed[@]})); then
+  actual="$(printf '%s\n' "${managed[@]}" | LC_ALL=C sort | xargs cat)"
 fi
+
+strip_markers() {
+  grep -v '^### houz42-keyboard-remapper scope: ' || true
+}
+expected="$(printf '%s' "$expected" | strip_markers)"
+actual="$(printf '%s' "$actual" | strip_markers)"
 
 drift="false"
 if [[ $actual != "$expected" ]]; then

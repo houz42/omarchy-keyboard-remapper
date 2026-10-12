@@ -1,0 +1,43 @@
+#!/bin/bash
+# Lists real keyboards as a JSON array [{id, name}, ...] for the per-device
+# rule picker in Panel.qml. Everything used here is world-readable (sysfs
+# + udev db), so no root and no /dev/input access is needed.
+#
+# id is the vendor:product pair keyd's [ids] section expects. Devices that
+# share an id+name across several event nodes (multi-interface boards) are
+# deduplicated. keyd's own virtual devices (vendor 0fac) and other virtual
+# senders are excluded -- remapping keyd's OUTPUT would feed its own rules
+# back into itself.
+
+set -euo pipefail
+
+shopt -s nullglob
+entries=()
+declare -A seen=()
+
+for node in /sys/class/input/event*; do
+  dev="$node/device"
+  [[ -r $dev/id/vendor && -r $dev/id/product && -r $dev/name ]] || continue
+  # udev's keyboard classification; skips mice, consumer-control nodes, etc.
+  if ! udevadm info -q property -p "${node#/sys}" 2>/dev/null | grep -q '^ID_INPUT_KEYBOARD=1$'; then
+    continue
+  fi
+  vendor="$(cat "$dev/id/vendor")"
+  product="$(cat "$dev/id/product")"
+  name="$(cat "$dev/name")"
+  # keyd's virtual keyboard/pointer (0fac:0ade/0fac:1ade) and LogiOps's
+  # virtual sender are not real keyboards.
+  [[ $vendor == "0fac" ]] && continue
+  [[ $name == *"Virtual Input"* ]] && continue
+  id="$vendor:$product"
+  key="$id|$name"
+  [[ -n ${seen[$key]:-} ]] && continue
+  seen[$key]=1
+  entries+=("$(jq -nc --arg id "$id" --arg name "$name" '{id: $id, name: $name}')")
+done
+
+if ((${#entries[@]})); then
+  printf '%s\n' "${entries[@]}" | jq -sc '.'
+else
+  printf '[]\n'
+fi

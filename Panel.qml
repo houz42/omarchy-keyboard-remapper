@@ -67,6 +67,53 @@ Panel {
     }
   }
 
+  // Real keyboards for the per-device rule picker, from bin/list-keyboards
+  // (sysfs + udev, no root). Refreshed when the popup opens; a device
+  // unplugged since a rule was created still renders by raw id (see
+  // deviceBadge), so stale rules never become invisible.
+  property var keyboards: []
+
+  Process {
+    id: keyboardsProcess
+    running: false
+    command: [root.binDir + "/list-keyboards"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var parsed = JSON.parse(String(text || "").trim())
+          root.keyboards = Array.isArray(parsed) ? parsed : []
+        } catch (e) {
+          root.keyboards = []
+        }
+      }
+    }
+  }
+
+  function deviceOptions() {
+    var opts = ["global (all keyboards)"]
+    for (var i = 0; i < root.keyboards.length; i++) {
+      opts.push(root.keyboards[i].name + " (" + root.keyboards[i].id + ")")
+    }
+    return opts
+  }
+
+  // "only on X" badge for a device-scoped rule row; "" for global rules.
+  function deviceBadge(rule) {
+    var d = rule.devices
+    if (!d || d.length === 0) return ""
+    var names = []
+    for (var i = 0; i < d.length; i++) {
+      var found = ""
+      for (var j = 0; j < root.keyboards.length; j++) {
+        if (root.keyboards[j].id === d[i]) { found = root.keyboards[j].name; break }
+      }
+      names.push(found !== "" ? found : d[i])
+    }
+    return "only on " + names.join(", ")
+  }
+
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
 
@@ -199,14 +246,52 @@ Panel {
   // options like caps:escape or altwin:swap_alt_win can migrate into keyd
   // rules 1:1 -- overloads can't express them. A rule without a `type`
   // field is an overload (schema back-compat).
+  // A rule's device scope: absent/empty `devices` = global. The scope key
+  // is the sorted id list joined by "+", so two rules written with the
+  // same device set in different orders share a chunk.
+  function scopeKey(rule) {
+    var d = rule.devices
+    if (!d || d.length === 0) return "*"
+    return d.slice().sort().join("+")
+  }
+
+  // Rendered blob = one chunk per device scope. Each chunk is a complete
+  // keyd conf headed by a marker comment -- keyd ignores "#" lines, and
+  // apply-keyd-config splits on the marker and installs it WITH its chunk,
+  // so the blob stays byte-identical to `cat` of the sorted live file set
+  // (what check-keyd-status diffs). The global chunk always exists, even
+  // with zero enabled rules, so a fresh install diffs clean. Chunk order
+  // matches LC_ALL=C filename order of the installed set: "*.conf" sorts
+  // before any id, and a multi-id scope ("a+b.conf") sorts before its
+  // prefix single-id scope ("a.conf"), exactly like the shell's glob.
   function renderConf() {
-    var lines = "[ids]\n*\n\n[main]\n"
+    var groups = {}
+    var scopes = []
     for (var i = 0; i < root.rules.length; i++) {
       var rule = root.rules[i]
       if (!root.isRuleEnabled(rule)) continue
-      lines += root.ruleSyntax(rule) + "\n"
+      var key = root.scopeKey(rule)
+      if (!groups[key]) {
+        groups[key] = []
+        scopes.push(key)
+      }
+      groups[key].push(root.ruleSyntax(rule))
     }
-    return lines
+    if (scopes.indexOf("*") === -1) scopes.push("*")
+    scopes.sort(function(a, b) {
+      var fa = a + ".conf", fb = b + ".conf"
+      return fa < fb ? -1 : fa > fb ? 1 : 0
+    })
+    var blob = ""
+    for (var g = 0; g < scopes.length; g++) {
+      var key = scopes[g]
+      var ids = key === "*" ? ["*"] : key.split("+")
+      blob += "### houz42-keyboard-remapper scope: " + key + "\n"
+      blob += "[ids]\n" + ids.join("\n") + "\n\n[main]\n"
+      var lines = groups[key] || []
+      for (var b = 0; b < lines.length; b++) blob += lines[b] + "\n"
+    }
+    return blob
   }
 
   function ruleSyntax(rule) {
@@ -226,21 +311,47 @@ Panel {
     return (rule.type || "overload") === "swap" ? [rule.source, rule.target] : [rule.source]
   }
 
+  // Device scope of a rule as a set; ["*"] = global, which overlaps every
+  // other scope. Two rules only collide on a source when their scopes
+  // OVERLAP -- the same key bound on disjoint keyboards is a legitimate
+  // per-device remap (each lands in a different conf file), not a
+  // duplicate.
+  function ruleScope(rule) {
+    var d = rule.devices
+    return (d && d.length > 0) ? d : ["*"]
+  }
+
+  function scopesOverlap(a, b) {
+    if (a.indexOf("*") !== -1 || b.indexOf("*") !== -1) return true
+    for (var i = 0; i < a.length; i++) {
+      if (b.indexOf(a[i]) !== -1) return true
+    }
+    return false
+  }
+
   // First source collision between candidate rules and the WHOLE catalog
   // (enabled or not -- a dormant duplicate is a trap armed for later), or
   // "" when clean. Used when creating rules.
   function duplicateError(candidates) {
-    var taken = {}
+    var taken = {}  // source -> [{label, scope}]
     for (var i = 0; i < root.rules.length; i++) {
       var r = root.rules[i]
-      root.boundSources(r).forEach(function(s) { taken[s] = r.label || r.id })
+      root.boundSources(r).forEach(function(s) {
+        if (!taken[s]) taken[s] = []
+        taken[s].push({ label: r.label || r.id, scope: root.ruleScope(r) })
+      })
     }
     for (var c = 0; c < candidates.length; c++) {
+      var candScope = root.ruleScope(candidates[c])
       var srcs = root.boundSources(candidates[c])
       for (var s = 0; s < srcs.length; s++) {
-        if (taken[srcs[s]] !== undefined)
-          return "Source key " + srcs[s] + " is already bound by '" + taken[srcs[s]] + "' — two rules can't bind the same key (keyd would silently keep only one)."
-        taken[srcs[s]] = candidates[c].label || candidates[c].id
+        var prior = taken[srcs[s]] || []
+        for (var p = 0; p < prior.length; p++) {
+          if (root.scopesOverlap(candScope, prior[p].scope))
+            return "Source key " + srcs[s] + " is already bound by '" + prior[p].label + "' on an overlapping device scope — two rules can't bind the same key for the same keyboard (keyd would silently keep only one)."
+        }
+        prior.push({ label: candidates[c].label || candidates[c].id, scope: candScope })
+        taken[srcs[s]] = prior
       }
     }
     return ""
@@ -250,13 +361,15 @@ Panel {
   // runs when toggling a rule on, since keyd only ever sees enabled rules.
   function enabledDuplicateError(rule) {
     var srcs = root.boundSources(rule)
+    var scope = root.ruleScope(rule)
     for (var i = 0; i < root.rules.length; i++) {
       var other = root.rules[i]
       if (other.id === rule.id || !root.isRuleEnabled(other)) continue
+      if (!root.scopesOverlap(scope, root.ruleScope(other))) continue
       var otherSrcs = root.boundSources(other)
       for (var a = 0; a < srcs.length; a++) {
         if (otherSrcs.indexOf(srcs[a]) !== -1)
-          return "Can't enable: " + srcs[a] + " is already bound by enabled rule '" + (other.label || other.id) + "' — keyd would silently keep only one of them."
+          return "Can't enable: " + srcs[a] + " is already bound by enabled rule '" + (other.label || other.id) + "' on an overlapping device scope — keyd would silently keep only one of them."
       }
     }
     return ""
@@ -373,6 +486,13 @@ Panel {
       rule.label = source + " tap → " + tap
       rule.id = root.uniqueRuleId(root.slugify(source + "-" + tap))
     }
+    // Optional per-device scope: the dropdown offers "global (all
+    // keyboards)" plus "Name (vid:pid)" entries; only the latter set
+    // `devices`. Multi-keyboard scopes are expressible by adding the same
+    // rule per device.
+    var deviceMatch = String(fields.device || "").match(/\(([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\)\s*$/)
+    if (deviceMatch) rule.devices = [deviceMatch[1].toLowerCase()]
+
     var collision = root.duplicateError([rule])
     if (collision !== "") return collision
     root.saveUserRules(root.userRules.concat([rule]))
@@ -389,7 +509,10 @@ Panel {
     }
   }
 
-  onOpenedChanged: if (opened) refreshNow()
+  onOpenedChanged: if (opened) {
+    refreshNow()
+    keyboardsProcess.running = true
+  }
 
   Timer {
     interval: root.refreshIntervalSec * 1000
@@ -956,6 +1079,16 @@ Panel {
                     wrapMode: Text.WordWrap
                   }
 
+                  Text {
+                    visible: text !== ""
+                    width: parent.width
+                    text: root.deviceBadge(ruleRow.modelData)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
                   // Double-map warning: this rule's emitted key is itself
                   // re-mapped by a live XKB option (see the XKB section
                   // below), so what apps receive differs from the rule.
@@ -1064,6 +1197,16 @@ Panel {
                 }
 
                 SearchableDropdown {
+                  id: deviceDropdown
+                  width: parent.width
+                  label: "Device (optional)"
+                  placeholderText: "Search devices..."
+                  triggerLabel: "Global (all keyboards)"
+                  options: root.deviceOptions()
+                  foreground: root.foreground
+                }
+
+                SearchableDropdown {
                   id: holdLayerDropdown
                   visible: typeDropdown.value === "" || typeDropdown.value === "overload"
                   width: parent.width
@@ -1114,7 +1257,8 @@ Panel {
                         source: sourceDropdown.value,
                         holdLayer: holdLayerDropdown.value,
                         tap: tapDropdown.value,
-                        target: targetDropdown.value
+                        target: targetDropdown.value,
+                        device: deviceDropdown.value
                       })
                       if (error !== "") {
                         formError.text = error
@@ -1124,6 +1268,7 @@ Panel {
                       descriptionField.text = ""
                       typeDropdown.value = ""
                       sourceDropdown.value = ""
+                      deviceDropdown.value = ""
                       holdLayerDropdown.value = ""
                       tapDropdown.value = ""
                       targetDropdown.value = ""
