@@ -1662,7 +1662,9 @@ Panel {
 
           Column {
             id: xkbSection
-            visible: root.xkbAvailable
+            // Nothing to show when kb_options is empty: an empty header is
+            // noise, and every control in the section acts on an option row.
+            visible: root.xkbAvailable && xkbRepeater.count > 0
             width: parent.width
             spacing: Style.space(6)
 
