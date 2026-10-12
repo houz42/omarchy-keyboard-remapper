@@ -408,6 +408,8 @@ Panel {
     var candSet = candScope.slice().sort().join("+")
     for (var i = 0; i < root.rules.length; i++) {
       var other = root.rules[i]
+      // Only enabled rules render a conf file, so only they can tie.
+      if (!root.isRuleEnabled(other)) continue
       var otherScope = root.ruleScope(other)
       if (otherScope[0] === "*") continue
       var otherSet = otherScope.slice().sort().join("+")
@@ -454,13 +456,16 @@ Panel {
     return false
   }
 
-  // First source collision between candidate rules and the WHOLE catalog
-  // (enabled or not -- a dormant duplicate is a trap armed for later), or
-  // "" when clean. Used when creating rules.
+  // First source collision between candidate rules and the ENABLED set
+  // (plus intra-batch), or "" when clean. Only enabled rules render into
+  // the keyd config, so a DISABLED same-source rule must never block
+  // creation or migration; enabling a colliding rule later is refused by
+  // enabledDuplicateError() at toggle time.
   function duplicateError(candidates) {
     var taken = {}  // source -> [{label, scope}]
     for (var i = 0; i < root.rules.length; i++) {
       var r = root.rules[i]
+      if (!root.isRuleEnabled(r)) continue
       root.boundSources(r).forEach(function(s) {
         if (!taken[s]) taken[s] = []
         taken[s].push({ label: r.label || r.id, scope: root.ruleScope(r) })
@@ -837,11 +842,22 @@ Panel {
     if (!root.isRuleEnabled(rule)) return ""
     var seen = root.xkbSeenAs
     var parts = []
-    var tapSeen = seen[rule.tap]
-    if (tapSeen) parts.push("tap emits " + rule.tap + " → compositor sees " + tapSeen)
-    var holdKey = root.holdLayerKeys[rule.holdLayer]
-    var holdSeen = holdKey ? seen[holdKey] : ""
-    if (holdSeen) parts.push("hold emits " + holdKey + " → compositor sees " + holdSeen)
+    var type = rule.type || "overload"
+    if (type === "overload") {
+      var tapSeen = seen[rule.tap]
+      if (tapSeen) parts.push("tap emits " + rule.tap + " → compositor sees " + tapSeen)
+      var holdKey = root.holdLayerKeys[rule.holdLayer]
+      var holdSeen = holdKey ? seen[holdKey] : ""
+      if (holdSeen) parts.push("hold emits " + holdKey + " → compositor sees " + holdSeen)
+    } else {
+      // map/swap emit their target (a swap emits in both directions).
+      var targetSeen = seen[rule.target]
+      if (targetSeen) parts.push(rule.source + " emits " + rule.target + " → compositor sees " + targetSeen)
+      if (type === "swap") {
+        var backSeen = seen[rule.source]
+        if (backSeen) parts.push(rule.target + " emits " + rule.source + " → compositor sees " + backSeen)
+      }
+    }
     return parts.length === 0 ? "" : parts.join("; ") + " (XKB)"
   }
 
@@ -989,40 +1005,57 @@ Panel {
   // The rules produced from one XKB option token: one rule per key pair so
   // each side stays independently removable afterwards. Swaps become the
   // bidirectional "swap" type (one row covers both directions); one-way
-  // "acts as" options become "map" rules.
-  function xkbRulesFor(token) {
+  // "acts as" options become "map" rules. The rules inherit the CURRENT
+  // TAB's scope -- migrating from a device tab scopes them to that
+  // keyboard (note the XKB option being removed is compositor-global:
+  // other keyboards lose it, which is the point of a scoped migration).
+  function xkbRulesFor(token, scopeKey) {
     if (!Object.prototype.hasOwnProperty.call(root.xkbOptionTable, token)) return []
     var entry = root.xkbOptionTable[token]
     var pairs = entry.swaps ? entry.swaps : entry.maps
     var type = entry.swaps ? "swap" : "map"
+    var devices = scopeKey === "*" ? undefined : scopeKey.split("+")
+    var idSuffix = devices ? "-" + devices.join("-") : ""
     var rules = []
     for (var i = 0; i < pairs.length; i++) {
       var a = pairs[i][0], b = pairs[i][1]
       rules.push({
-        id: root.uniqueRuleId(root.slugify("xkb-" + a + "-" + b)),
+        id: root.uniqueRuleId(root.slugify("xkb-" + a + "-" + b + idSuffix)),
         label: a + (type === "swap" ? " ⇄ " : " → ") + b,
         description: "Migrated from XKB option " + token,
         type: type,
         source: a,
         target: b,
+        devices: devices,
         defaultEnabled: true
       })
     }
     return rules
   }
 
+  function refuseMigration(msg) {
+    root.lastMessage = "Migration refused: " + msg
+    Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper", root.lastMessage])
+  }
+
   function migrateXkbOptions(tokens) {
     if (root.applying || root.xkbApplying || root.pendingXkbMigration) return
     tokens = tokens.filter(function(t) { return root.xkbMigratableTokens().indexOf(t) !== -1 })
     if (tokens.length === 0) return
+    var scope = root.selectedScopeId
     var newRules = []
-    for (var t = 0; t < tokens.length; t++) newRules = newRules.concat(root.xkbRulesFor(tokens[t]))
+    for (var t = 0; t < tokens.length; t++) newRules = newRules.concat(root.xkbRulesFor(tokens[t], scope))
     if (newRules.length === 0) return
-    // Refuse the whole batch on any source collision with the catalog -- a
-    // half-migrated set is worse than none.
+    // Refuse the whole batch on any collision with the applied set -- a
+    // half-migrated set is worse than none. Refusals are notified, not
+    // just a status-line blurb (the first "nothing happened" report was a
+    // silent refusal).
     var collision = root.duplicateError(newRules)
+    for (var r = 0; collision === "" && r < newRules.length; r++) {
+      collision = root.scopeConflictError(newRules[r])
+    }
     if (collision !== "") {
-      root.lastMessage = "Migration refused: " + collision
+      root.refuseMigration(collision)
       return
     }
     // Persist BEFORE writing the rules: the state survives a shell restart
@@ -1208,10 +1241,32 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            PanelSectionHeader {
-              text: "RULES"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            Item {
+              width: parent.width
+              height: rulesHeader.implicitHeight
+
+              PanelSectionHeader {
+                id: rulesHeader
+                anchors.left: parent.left
+                text: "RULES"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              PanelActionButton {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "\uf067"
+                tooltipText: "Add rule"
+                foreground: root.foreground
+                bordered: true
+                onClicked: {
+                  // Opened from a scope tab -> preset that device, so a
+                  // rule added from the Milsky tab lands on the Milsky.
+                  deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
+                  addRuleForm.visible = true
+                }
+              }
             }
 
             // Scope tabs: Global plus every keyboard seen on the machine.
@@ -1362,7 +1417,10 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   // Every rule is removable: user rules are deleted, shipped
                   // rules are hidden via state (see removeRule).
-                  iconText: "-"
+                  // nf-fa-minus (not a text "-") so the stroke weight
+                  // matches the other icon buttons.
+                  iconText: "\uf068"
+                  bordered: true
                   tooltipText: "Remove " + (ruleRow.modelData.label || ruleRow.modelData.id)
                   foreground: root.foreground
                   hoverColor: Color.urgent
@@ -1388,43 +1446,20 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
-              Row {
-                spacing: Style.space(12)
-                visible: !addRuleForm.visible
+              Text {
+                visible: root.hiddenShipped.length > 0 && !addRuleForm.visible
+                text: "Restore " + root.hiddenShipped.length + " hidden shipped rule" + (root.hiddenShipped.length === 1 ? "" : "s")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
 
-                Text {
-                  text: "+ Add rule"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      // Opened from a scope tab -> preset that device, so a
-                      // rule added from the Milsky tab lands on the Milsky.
-                      deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
-                      addRuleForm.visible = true
-                    }
-                  }
-                }
-
-                Text {
-                  visible: root.hiddenShipped.length > 0
-                  text: "Restore " + root.hiddenShipped.length + " hidden shipped rule" + (root.hiddenShipped.length === 1 ? "" : "s")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      root.hiddenShipped = []
-                      hiddenShippedFile.setText("[]\n")
-                      root.recomputeRules()
-                    }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.hiddenShipped = []
+                    hiddenShippedFile.setText("[]\n")
+                    root.recomputeRules()
                   }
                 }
               }
@@ -1611,27 +1646,42 @@ Panel {
                 fontFamily: root.fontFamily
               }
 
-              // The explainer lives behind this hover hint; as always-on
-              // caption text it dominated the section.
-              Text {
+              Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: "(?)"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                spacing: Style.space(6)
 
-                MouseArea {
-                  id: xkbInfoHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  acceptedButtons: Qt.NoButton
+                PanelActionButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "\uf067"
+                  tooltipText: "Add XKB option"
+                  foreground: root.foreground
+                  bordered: true
+                  enabled: !root.xkbApplying && root.pendingXkbMigration === null
+                  onClicked: addXkbForm.visible = true
+                }
+
+                // The explainer lives behind this hover hint; as always-on
+                // caption text it dominated the section.
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "(?)"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    id: xkbInfoHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.NoButton
+                  }
                 }
               }
 
               PanelToolTip {
                 visible: xkbInfoHover.containsMouse
-                text: "Live compositor kb_options, applied after keyd.\n→ migrates an option into keyd rules; − removes it."
+                text: "Live compositor kb_options, applied after keyd.\n→ migrates an option into keyd rules, scoped to the selected tab; − removes it."
                 fontFamily: root.fontFamily
               }
             }
@@ -1687,7 +1737,7 @@ Panel {
                     visible: xkbRow.modelData.migratable
                     width: visible ? size : 0
                     iconText: "\uf061"
-                    tooltipText: "Migrate to keyd rules\n(option removed once keyd is live)"
+                    tooltipText: "Migrate to keyd rules, scoped to " + (root.selectedScopeId === "*" ? "Global" : root.scopeLabel(root.selectedScopeId)) + "\n(option removed once keyd is live)"
                     foreground: root.foreground
                     bordered: true
                     enabled: !root.applying && !root.xkbApplying && root.pendingXkbMigration === null
@@ -1695,7 +1745,7 @@ Panel {
                   }
 
                   PanelActionButton {
-                    iconText: "-"
+                    iconText: "\uf068"
                     tooltipText: "Remove " + xkbRow.modelData.token + " from kb_options"
                     foreground: root.foreground
                     hoverColor: Color.urgent
@@ -1707,36 +1757,17 @@ Panel {
               }
             }
 
-            Row {
-              spacing: Style.space(12)
-              visible: !addXkbForm.visible
+            Text {
+              visible: root.xkbMigratableTokens().length > 1 && !addXkbForm.visible
+              text: "Migrate all to keyd"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
 
-              Text {
-                visible: root.xkbAddableOptions().length > 0
-                text: "+ Add option"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: addXkbForm.visible = true
-                }
-              }
-
-              Text {
-                visible: root.xkbMigratableTokens().length > 1
-                text: "Migrate all to keyd"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
-                }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
               }
             }
 
