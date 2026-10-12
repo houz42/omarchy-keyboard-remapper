@@ -220,7 +220,7 @@ remapped by one of those options, the rule row shows an amber warning
 switches to ⚠. A rule's `source` key is never flagged: keyd consumes it at
 evdev level, before XKB runs, so swaps can't change a rule's input side.
 
-**Editing.** Options can be removed (−) or added from the popup. That
+**Editing.** Options can be removed (−) or migrated away (→). Removal
 rewrites the `kb_options` value in your Hyprland config in place
 (`bin/set-xkb-options`, non-privileged — it's a user-owned file, no
 pkexec), preserving the file's quoting style and leaving a
@@ -230,7 +230,10 @@ into the source with `chezmoi re-add` so the next `chezmoi apply` doesn't
 revert it (template sources are reported, never clobbered). The writer
 targets the first uncommented `kb_options` assignment it finds under
 `~/.config/hypr/` (input.lua, hyprland.lua, other *.lua, then *.conf); if
-none exists it refuses rather than inventing a config block.
+none exists it refuses rather than inventing a config block. There is
+deliberately no "add option" affordance: XKB options are global
+compositor config — author them in your Hyprland/dotfiles setup, not
+here.
 
 **Migration.** Options with known semantics (the swaps and "acts as"
 mappings in the decode table) carry a migrate button (→), plus a "Migrate

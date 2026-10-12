@@ -763,7 +763,9 @@ Panel {
   }
 
   function applyXkbStatus(text) {
-    var match = String(text || "").match(/^str:\s*(.*)$/m)
+    // [ \t]* not \s* -- \s eats the newline too, so an EMPTY option value
+    // captured the NEXT line ("set: true") as the option string.
+    var match = String(text || "").match(/^str:[ \t]*(.*)$/m)
     if (!match) {
       root.xkbAvailable = false
       root.xkbOptionsRaw = ""
@@ -945,22 +947,6 @@ Panel {
 
   function removeXkbOption(token) {
     root.removeXkbOptions([token])
-  }
-
-  function addXkbOption(token) {
-    token = String(token || "").trim()
-    if (token === "" || root.xkbTokensNow().indexOf(token) !== -1) return
-    root.setXkbOptions(root.xkbTokensNow().concat([token]))
-  }
-
-  function xkbAddableOptions() {
-    var now = {}
-    root.xkbTokensNow().forEach(function(t) { now[t] = true })
-    var out = []
-    for (var k in root.xkbOptionTable) {
-      if (Object.prototype.hasOwnProperty.call(root.xkbOptionTable, k) && !now[k]) out.push(k)
-    }
-    return out.sort()
   }
 
   function xkbMigratableTokens() {
@@ -1466,17 +1452,21 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
-              // Add affordance: framed plus button on its own row at the
-              // END of the list (header placement read as noise). Restore
-              // link shares the row when hidden shipped rules exist.
+              // Add affordance: framed icon+text button on its own row at
+              // the END of the list (a lone icon read as ambiguous there).
+              // Restore link shares the row when hidden shipped rules exist.
               Row {
                 spacing: Style.space(12)
                 visible: !addRuleForm.visible
 
-                PanelActionButton {
+                Button {
                   iconText: "\uf067"
-                  tooltipText: "Add rule"
+                  text: "Add rule"
+                  fontSize: Style.font.caption
                   foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY
                   bordered: true
                   onClicked: {
                     // Opened from a scope tab -> preset that device, so a
@@ -1784,80 +1774,17 @@ Panel {
               }
             }
 
-            Row {
-              spacing: Style.space(12)
-              visible: !addXkbForm.visible
+            Text {
+              visible: root.xkbMigratableTokens().length > 1
+              text: "Migrate all to keyd"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
 
-              PanelActionButton {
-                iconText: "\uf067"
-                tooltipText: "Add XKB option"
-                foreground: root.foreground
-                bordered: true
-                enabled: !root.xkbApplying && root.pendingXkbMigration === null
-                onClicked: addXkbForm.visible = true
-              }
-
-              Text {
-                visible: root.xkbMigratableTokens().length > 1
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Migrate all to keyd"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
-                }
-              }
-            }
-
-            Column {
-              id: addXkbForm
-              visible: false
-              width: parent.width
-              spacing: Style.space(6)
-
-              SearchableDropdown {
-                id: xkbOptionDropdown
-                width: parent.width
-                label: "XKB option"
-                placeholderText: "Search options..."
-                triggerLabel: "Select option"
-                options: root.xkbAddableOptions()
-                foreground: root.foreground
-              }
-
-              Row {
-                spacing: Style.space(8)
-
-                Button {
-                  text: "Add"
-                  fontSize: Style.font.bodySmall
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  horizontalPadding: Style.spacing.controlPaddingX
-                  verticalPadding: Style.spacing.controlPaddingY
-                  bordered: true
-                  enabled: !root.xkbApplying
-                  onClicked: {
-                    root.addXkbOption(xkbOptionDropdown.value)
-                    xkbOptionDropdown.value = ""
-                    addXkbForm.visible = false
-                  }
-                }
-
-                Button {
-                  text: "Cancel"
-                  fontSize: Style.font.bodySmall
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  horizontalPadding: Style.spacing.controlPaddingX
-                  verticalPadding: Style.spacing.controlPaddingY
-                  bordered: true
-                  onClicked: addXkbForm.visible = false
-                }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
               }
             }
 
