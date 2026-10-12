@@ -29,6 +29,13 @@ for node in /sys/class/input/event*; do
   # virtual sender are not real keyboards.
   [[ $vendor == "0fac" ]] && continue
   [[ $name == *"Virtual Input"* ]] && continue
+  # Not keyboards in the scoping sense, though they present a full keyboard
+  # interface (letter keys and all) to the OS: security keys (type OTP
+  # strings) and wireless dongles. The receiver case is a tradeoff -- a
+  # Logitech BOARD paired via unifying also arrives as "USB Receiver", so
+  # it would be hidden here; hand-edit user-rules.json with the vid:pid
+  # (rules still apply globally regardless). One regex to adjust.
+  [[ $name =~ [Rr]eceiver|[Yy]ubi|[Ss]ecurity\ [Kk]ey ]] && continue
   id="$vendor:$product"
   key="$id|$name"
   [[ -n ${seen[$key]:-} ]] && continue

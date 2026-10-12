@@ -140,13 +140,25 @@ that copy to detect drift — the read-only status script never needs to know
 what a "rule" is, it just diffs two blobs.
 
 **Per-device rules.** A rule is global by default; the add-rule form's
-device dropdown scopes it to one keyboard. Once any scoped rule exists,
-the popup shows **one tab per keyboard** (Global first) and each tab lists
-only its scope's rules; the add form opened from a device tab presets that
-device. A rule scoped to an unplugged device keeps a raw-id tab, so it
-never becomes invisible. Rules group by scope into separate keyd configs
-at apply time: the global scope installs as
-`/etc/keyd/houz42-keyboard-remapper.conf`, device scopes as
+device dropdown scopes it to one keyboard. The popup shows **one tab per
+keyboard** (Global first) and each tab lists only its scope's rules; the
+add form opened from a device tab presets that device. A rule scoped to
+an unplugged device keeps a raw-id tab, so it never becomes invisible.
+The device list comes from sysfs/udev (`bin/list-keyboards`) and filters
+out things that present a keyboard interface but aren't boards you'd
+scope rules to: security keys (YubiKey etc. — they *type* OTP strings,
+so they have full letter-key capabilities) and wireless dongles
+("USB Receiver"). Caveat on the latter: a Logitech *board* paired via a
+unifying receiver also arrives as "USB Receiver" and would be hidden —
+hand-edit `user-rules.json` with its vid:pid instead (or adjust the one
+regex in `bin/list-keyboards`).
+
+**A tab is per-model, not per-instance.** keyd's `[ids]` matches
+vendor:product only — there is no serial-number or per-instance matching.
+Two identical keyboards of the same model share one tab, and a scoped
+rule applies to every connected instance of that model. Rules group by
+scope into separate keyd configs at apply time: the global scope installs
+as `/etc/keyd/houz42-keyboard-remapper.conf`, device scopes as
 `houz42-keyboard-remapper_<vid:pid>.conf` (which sorts after the global
 file, so device bindings override global ones for the same key — keyd
 merges every matching file per device, later files winning). The rendered

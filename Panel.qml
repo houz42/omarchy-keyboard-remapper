@@ -114,24 +114,6 @@ Panel {
     return names.join(" + ")
   }
 
-  // Tab-cell label: first word of the device name ("Logitech USB
-  // Receiver" -> "Logitech"); multi-id scopes join their first words;
-  // unplugged devices (raw id, no name match) stay whole -- already short.
-  function scopeShortLabel(key) {
-    if (key === "*") return "Global"
-    var ids = key.split("+")
-    var words = []
-    for (var i = 0; i < ids.length; i++) {
-      var known = false
-      for (var j = 0; j < root.keyboards.length; j++) {
-        if (root.keyboards[j].id === ids[i]) { known = true; break }
-      }
-      if (!known) { words.push(ids[i]); continue }
-      words.push(root.scopeLabel(ids[i]).split(" ")[0])
-    }
-    return words.join("+")
-  }
-
   // The add-form device option matching a scope (single-id scopes only;
   // multi-id tabs have no single dropdown entry, so they preset global).
   function deviceOptionFor(key) {
@@ -1119,15 +1101,18 @@ Panel {
             // Scope tabs: Global plus every keyboard seen on the machine.
             // Segmented control, same pattern as the built-in Agents
             // providerSwitch: equal-width bordered cells with a selected
-            // fill, 3 per row (device names are long; short labels on the
-            // cell, full name + id on the tooltip).
+            // fill, 2 per row so full device names (vendor AND model, e.g.
+            // "Milsky X87EC-RGB") fit -- the model in the title is what
+            // distinguishes two boards from the same vendor. keyd matches
+            // devices by vid:pid only, so a tab is per-MODEL: two identical
+            // boards share it and get the same rules.
             Flow {
               id: scopeChips
               visible: root.scopeTabs().length > 1
               width: parent.width
               spacing: Style.space(6)
 
-              readonly property real cellWidth: (width - spacing * 2) / 3
+              readonly property real cellWidth: (width - spacing) / 2
 
               Repeater {
                 model: root.scopeTabs()
@@ -1135,15 +1120,15 @@ Panel {
                 delegate: Button {
                   required property var modelData
                   width: scopeChips.cellWidth
-                  text: root.scopeShortLabel(modelData.key)
+                  text: modelData.label
                   tooltipText: modelData.key === "*"
                     ? "Rules applying to all keyboards"
-                    : modelData.label + " (" + modelData.key + ")"
+                    : modelData.label + " (" + modelData.key + ") — applies to every connected instance of this model"
                   selected: root.selectedScopeId === modelData.key
                   bordered: true
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  fontSize: Style.font.bodySmall
+                  fontSize: Style.font.caption
                   horizontalPadding: Style.space(4)
                   verticalPadding: Style.spacing.controlPaddingY
                   onClicked: root.selectedScopeId = modelData.key
