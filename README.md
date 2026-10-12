@@ -143,12 +143,41 @@ something manually restarts it. The first apply installs a systemd drop-in
 `Restart=on-failure` / `RestartSec=1`) so a future crash self-heals in about
 a second instead of requiring you to reopen the popup and hit Re-apply.
 
+## XKB awareness (read-only)
+
+`keyd` sits *below* the compositor's XKB layer in the input stack: every
+key a rule emits is re-interpreted by Hyprland's `kb_options` before any
+app sees it. A rule whose emitted key is itself remapped by an XKB option
+silently produces a *third* key at the compositor — e.g. `leftalt →
+leftmeta` while `altwin:swap_alt_win` is active comes out as `leftalt`,
+the exact opposite of the rule's label.
+
+The popup reads the compositor's **live** `kb_options` (`hyprctl getoption
+input:kb_options`, which reflects the running value even under Quattro/Lua
+configs) and shows them in a read-only "XKB — via Hyprland" section next
+to the keyd rules. When an enabled rule's `tap` key or hold-layer modifier
+is remapped by one of those options, the rule row shows an amber warning
+("hold emits leftalt → compositor sees leftmeta") and the bar icon
+switches to ⚠. A rule's `source` key is never flagged: keyd consumes it at
+evdev level, before XKB runs, so swaps can't change a rule's input side.
+
+These options are owned by your Hyprland config — the plugin never writes
+them. Note the live value is read, not the config files, so stale `*.conf`
+siblings and multi-block Lua configs don't confuse it.
+
 ## Known limitations
 
 - If your `tap` target is meant to reach a terminal-hosted app (herdr,
   tmux, etc.), avoid F13–F24 — see "Why" above for the Shift-F1–F12
   collision. This isn't fixable in `keyd`/this plugin; it's how terminal
   emulators encode those keys.
+- Never enable two rules that share the same `source` key: keyd rejects
+  duplicate bindings in one layer, so the apply would restart `keyd` into
+  a failed service and every remap dies until the config is fixed. The
+  popup doesn't guard against this combination yet.
+- The XKB conflict check decodes the common remapping options
+  (`altwin:swap_*`, `caps:*`, `ctrl:swap_*`); unlisted `kb_options`
+  tokens are shown raw and never flagged.
 - `keyd` 2.6.0 has known SIGSEGV crashes on some hardware. This plugin
   installs an auto-restart systemd drop-in on first apply (see "How it
   works") so a crash recovers on its own, but if you see the bar icon go to

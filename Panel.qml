@@ -8,11 +8,15 @@ import qs.Ui
 // Standalone bar-widget plugin managing a small set of keyd rules, loaded
 // from rules.json next to this file -- see that file to add your own
 // mappings (or the README's "Add your own mappings" section). Ships with
-// one rule: a standalone tap of the physical Alt key emits F13 (bound to
+// one rule: a standalone tap of the physical Alt key emits F12 (bound to
 // herdr's prefix), while holding Alt still passes through as a normal
 // modifier for every existing Hyprland/herdr Alt-chord. CapsLock<->Ctrl and
 // Win<->Alt stay owned by Hyprland's own XKB config -- this plugin never
-// touches them.
+// touches them, but it DOES read the compositor's live kb_options and shows
+// them alongside the keyd rules (see the XKB section below): keyd sits below
+// XKB in the input stack, so a rule whose EMITTED key is re-mapped by an XKB
+// option silently produces a third key at the compositor, and the popup
+// flags that class of double-map instead of letting it "apply" invisibly.
 //
 // All root-owned mutation (installing keyd, writing /etc/keyd/*.conf,
 // (re)starting the service) happens through exactly one fixed-argv pkexec
@@ -177,6 +181,8 @@ Panel {
     if (!root.keydPresent) return "keyd not installed"
     if (!root.keydActive) return "keyd installed, service inactive"
     if (root.drift) return "Config drifted from expected"
+    var conflicts = root.xkbConflictCount()
+    if (conflicts > 0) return conflicts + " XKB double-map conflict" + (conflicts === 1 ? "" : "s")
     var onCount = root.rules.filter(root.isRuleEnabled).length
     if (onCount === 0) return "No rules enabled"
     return onCount + " of " + root.rules.length + " rule" + (root.rules.length === 1 ? "" : "s") + " active"
@@ -341,8 +347,8 @@ Panel {
   }
 
   function refreshNow() {
-    if (statusProcess.running) return
-    statusProcess.running = true
+    if (!statusProcess.running) statusProcess.running = true
+    if (!xkbProcess.running) xkbProcess.running = true
   }
 
   function applyStatus(text) {
@@ -363,8 +369,131 @@ Panel {
     if (!root.keydPresent && !installPrompted.shown) {
       installPrompted.shown = true
       Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper",
-        "keyd isn't installed yet. Open the bar icon and press Install & Enable to set up Alt tap → F13."])
+        "keyd isn't installed yet. Open the bar icon and press Install & Enable to set up Alt tap → F12."])
     }
+  }
+
+  // ----- Live XKB options (read-only awareness; Hyprland owns them) -----
+  //
+  // Read via `hyprctl getoption` (the compositor's actual live value, which
+  // works under Quattro/Lua config too) rather than by parsing the user's
+  // hyprland config files -- Lua syntax, multiple config blocks, and stale
+  // .conf siblings make file-parsing fragile, and the live value is the only
+  // one that matters for conflict detection anyway. hyprctl inherits the
+  // session env from the shell process, so no environment setup is needed.
+  property bool xkbAvailable: false
+  property string xkbOptionsRaw: ""
+
+  Process {
+    id: xkbProcess
+    running: false
+    command: ["hyprctl", "getoption", "input:kb_options"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyXkbStatus(text)
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      // Failures (not on Hyprland, hyprctl missing) surface as "no str: line"
+      // in applyXkbStatus; nothing to do with stderr itself.
+      onStreamFinished: {}
+    }
+  }
+
+  function applyXkbStatus(text) {
+    var match = String(text || "").match(/^str:\s*(.*)$/m)
+    if (!match) {
+      root.xkbAvailable = false
+      root.xkbOptionsRaw = ""
+      return
+    }
+    root.xkbAvailable = true
+    root.xkbOptionsRaw = match[1].trim()
+  }
+
+  // Known remapping options, decoded straight into keyd key names so the
+  // conflict check below can compare against rule source/tap without any
+  // keysym translation. `swaps` register both directions in the seen-as map,
+  // `maps` (one-way "acts as") register one. Options not in the table
+  // (compose:, grp:, lv3:, shift:...) aren't key remaps -- they're listed
+  // raw in the UI and never conflict.
+  readonly property var xkbOptionTable: ({
+    "altwin:swap_alt_win":   { label: "Swap Alt ⇄ Super (both sides)", swaps: [["leftalt", "leftmeta"], ["rightalt", "rightmeta"]] },
+    "altwin:swap_lalt_lwin": { label: "Swap Left Alt ⇄ Left Super",    swaps: [["leftalt", "leftmeta"]] },
+    "altwin:meta_alt":       { label: "Alt keys act as Super",         maps:  [["leftalt", "leftmeta"], ["rightalt", "rightmeta"]] },
+    "altwin:ctrl_win":       { label: "Win keys act as Ctrl",          maps:  [["leftmeta", "leftctrl"], ["rightmeta", "rightctrl"]] },
+    "caps:escape":           { label: "CapsLock acts as Escape",       maps:  [["capslock", "escape"]] },
+    "caps:swapescape":       { label: "Swap CapsLock ⇄ Escape",        swaps: [["capslock", "escape"]] },
+    "caps:ctrl_modifier":    { label: "CapsLock is an extra Ctrl",     maps:  [["capslock", "leftctrl"]] },
+    "caps:super":            { label: "CapsLock is an extra Super",    maps:  [["capslock", "leftmeta"]] },
+    "ctrl:swap_lwin_lctl":   { label: "Swap Left Super ⇄ Left Ctrl",   swaps: [["leftmeta", "leftctrl"]] },
+    "ctrl:swap_rwin_rctl":   { label: "Swap Right Super ⇄ Right Ctrl", swaps: [["rightmeta", "rightctrl"]] }
+  })
+
+  // Representative evdev key for each hold layer's modifier output -- what
+  // the compositor actually sees pressed while the rule is held.
+  readonly property var holdLayerKeys: ({ "alt": "leftalt", "control": "leftctrl", "shift": "leftshift", "meta": "leftmeta", "altgr": "rightalt" })
+
+  // key-as-emitted -> key-as-seen-by-the-compositor, derived from the live
+  // options. Rebuilt whenever xkbOptionsRaw changes.
+  readonly property var xkbSeenAs: (function() {
+    var seen = {}
+    var tokens = root.xkbOptionsRaw === "" ? [] : root.xkbOptionsRaw.split(",")
+    for (var t = 0; t < tokens.length; t++) {
+      var entry = root.xkbOptionTable[tokens[t].trim()]
+      if (!entry) continue
+      var i
+      if (entry.swaps) for (i = 0; i < entry.swaps.length; i++) {
+        seen[entry.swaps[i][0]] = entry.swaps[i][1]
+        seen[entry.swaps[i][1]] = entry.swaps[i][0]
+      }
+      if (entry.maps) for (i = 0; i < entry.maps.length; i++) {
+        seen[entry.maps[i][0]] = entry.maps[i][1]
+      }
+    }
+    return seen
+  })()
+
+  // Rows for the XKB section: every live option token, decoded when known.
+  function xkbRows() {
+    if (!root.xkbAvailable || root.xkbOptionsRaw === "") return []
+    var tokens = root.xkbOptionsRaw.split(",")
+    var rows = []
+    for (var i = 0; i < tokens.length; i++) {
+      var token = tokens[i].trim()
+      if (token === "") continue
+      var entry = root.xkbOptionTable[token]
+      rows.push({ token: token, label: entry ? entry.label : "" })
+    }
+    return rows
+  }
+
+  // Amber warning for an ENABLED rule whose emitted key is re-mapped by a
+  // live XKB option -- the double-map trap: the rule says leftalt → leftmeta,
+  // but an XKB swap turns that leftmeta back into leftalt, so the compositor
+  // shows the opposite of the rule's label. The rule's SOURCE key is never
+  // checked: keyd consumes it at evdev level, before XKB runs, so a swap
+  // can't change what reaches a rule's input side.
+  function xkbConflict(rule) {
+    if (!root.isRuleEnabled(rule)) return ""
+    var seen = root.xkbSeenAs
+    var parts = []
+    var tapSeen = seen[rule.tap]
+    if (tapSeen) parts.push("tap emits " + rule.tap + " → compositor sees " + tapSeen)
+    var holdKey = root.holdLayerKeys[rule.holdLayer]
+    var holdSeen = holdKey ? seen[holdKey] : ""
+    if (holdSeen) parts.push("hold emits " + holdKey + " → compositor sees " + holdSeen)
+    return parts.length === 0 ? "" : parts.join("; ") + " (XKB)"
+  }
+
+  function xkbConflictCount() {
+    var n = 0
+    for (var i = 0; i < root.rules.length; i++) {
+      if (root.xkbConflict(root.rules[i]) !== "") n++
+    }
+    return n
   }
 
   FileView {
@@ -448,7 +577,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.drift ? "⚠" : "⌨"
+    text: (root.drift || root.xkbConflictCount() > 0) ? "⚠" : "⌨"
     tooltipText: "Keyboard Remapper: " + root.heroMeta()
     onPressed: function(buttonCode) {
       root.toggle()
@@ -553,6 +682,19 @@ Panel {
                     width: parent.width
                     text: ruleRow.modelData.description || ""
                     color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  // Double-map warning: this rule's emitted key is itself
+                  // re-mapped by a live XKB option (see the XKB section
+                  // below), so what apps receive differs from the rule.
+                  Text {
+                    visible: text !== ""
+                    width: parent.width
+                    text: root.xkbConflict(ruleRow.modelData)
+                    color: root.amber
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     wrapMode: Text.WordWrap
@@ -733,6 +875,67 @@ Panel {
               bordered: true
               enabled: !root.applying
               onClicked: root.installAndEnable()
+            }
+          }
+
+          // ----- System mappings outside keyd's reach (read-only) -----
+          //
+          // The compositor's own XKB options apply AFTER keyd, so they are
+          // part of the effective mapping for every key this plugin emits.
+          // Shown for awareness + conflict context only; they are edited in
+          // the Hyprland config, never from here.
+          PanelSeparator {
+            visible: xkbSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: xkbSection
+            visible: root.xkbAvailable && xkbRepeater.count > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "XKB — VIA HYPRLAND (READ-ONLY)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              id: xkbRepeater
+              model: root.xkbRows()
+
+              delegate: Column {
+                width: parent.width
+                spacing: 0
+
+                Text {
+                  width: parent.width
+                  text: modelData.label !== "" ? modelData.label : modelData.token
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  visible: modelData.label !== ""
+                  width: parent.width
+                  text: modelData.token
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "Live compositor kb_options. Applied after keyd — edit in your Hyprland input config, not here."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 

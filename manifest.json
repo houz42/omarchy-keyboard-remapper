@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "houz42.keyboard-remapper",
   "name": "Keyboard Remapper",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "author": "houz42",
   "license": "MIT",
-  "description": "Evdev-level tap/hold key remaps via keyd. Add/remove rules right from the popup (written to gitignored user-rules.json) or edit rules.json directly. Ships with one example: tap the physical Alt key alone to emit F12 (for herdr's prefix), while holding Alt still works as a normal modifier.",
+  "description": "Evdev-level tap/hold key remaps via keyd. Add/remove rules right from the popup (written to gitignored user-rules.json) or edit rules.json directly. Ships with one example: tap the physical Alt key alone to emit F12 (for herdr's prefix), while holding Alt still works as a normal modifier. Also shows the compositor's live XKB options (read-only) and warns when a keyd rule's emitted key is re-mapped by them (double-map).",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "Panel.qml"
