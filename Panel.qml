@@ -1498,7 +1498,7 @@ Panel {
 
               PanelToolTip {
                 visible: xkbInfoHover.containsMouse
-                text: "Live compositor kb_options, applied after keyd. − removes an option; → keyd migrates it into a rule above (option removed once the keyd side is live)."
+                text: "Live compositor kb_options, applied after keyd.\n→ migrates an option into keyd rules; − removes it."
                 fontFamily: root.fontFamily
               }
             }
@@ -1546,17 +1546,16 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(6)
 
-                  // Migrate this option into keyd rule(s), then drop the
-                  // option -- only shown for options with known semantics.
-                  Button {
+                  // Both row actions are the SAME component -- framed,
+                  // icon-only, meaning on the tooltip -- so they align and
+                  // leave the row's width to the option label. Migrate is
+                  // only offered for options with known semantics.
+                  PanelActionButton {
                     visible: xkbRow.modelData.migratable
-                    text: "→ keyd"
-                    tooltipText: "Migrate " + xkbRow.modelData.token + " into keyd rule(s), then remove it here (option stays until the keyd side is live)"
-                    fontSize: Style.font.caption
+                    width: visible ? size : 0
+                    iconText: "\uf061"
+                    tooltipText: "Migrate to keyd rules\n(option removed once keyd is live)"
                     foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    horizontalPadding: Style.spacing.controlPaddingX
-                    verticalPadding: Style.spacing.controlPaddingY
                     bordered: true
                     enabled: !root.applying && !root.xkbApplying && root.pendingXkbMigration === null
                     onClicked: root.migrateXkbOptions([xkbRow.modelData.token])
@@ -1567,6 +1566,7 @@ Panel {
                     tooltipText: "Remove " + xkbRow.modelData.token + " from kb_options"
                     foreground: root.foreground
                     hoverColor: Color.urgent
+                    bordered: true
                     enabled: !root.xkbApplying && root.pendingXkbMigration === null
                     onClicked: root.removeXkbOption(xkbRow.modelData.token)
                   }
