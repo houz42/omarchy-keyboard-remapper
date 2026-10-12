@@ -114,6 +114,24 @@ Panel {
     return names.join(" + ")
   }
 
+  // Tab-cell label: first word of the device name ("Logitech USB
+  // Receiver" -> "Logitech"); multi-id scopes join their first words;
+  // unplugged devices (raw id, no name match) stay whole -- already short.
+  function scopeShortLabel(key) {
+    if (key === "*") return "Global"
+    var ids = key.split("+")
+    var words = []
+    for (var i = 0; i < ids.length; i++) {
+      var known = false
+      for (var j = 0; j < root.keyboards.length; j++) {
+        if (root.keyboards[j].id === ids[i]) { known = true; break }
+      }
+      if (!known) { words.push(ids[i]); continue }
+      words.push(root.scopeLabel(ids[i]).split(" ")[0])
+    }
+    return words.join("+")
+  }
+
   // The add-form device option matching a scope (single-id scopes only;
   // multi-id tabs have no single dropdown entry, so they preset global).
   function deviceOptionFor(key) {
@@ -1099,25 +1117,34 @@ Panel {
             }
 
             // Scope tabs: Global plus every keyboard seen on the machine.
-            // Flow (not Row) so the chips WRAP -- several long device names
-            // would otherwise run off the popup's fixed narrow width.
+            // Segmented control, same pattern as the built-in Agents
+            // providerSwitch: equal-width bordered cells with a selected
+            // fill, 3 per row (device names are long; short labels on the
+            // cell, full name + id on the tooltip).
             Flow {
               id: scopeChips
               visible: root.scopeTabs().length > 1
               width: parent.width
               spacing: Style.space(6)
 
+              readonly property real cellWidth: (width - spacing * 2) / 3
+
               Repeater {
                 model: root.scopeTabs()
 
                 delegate: Button {
-                  text: modelData.label
+                  required property var modelData
+                  width: scopeChips.cellWidth
+                  text: root.scopeShortLabel(modelData.key)
+                  tooltipText: modelData.key === "*"
+                    ? "Rules applying to all keyboards"
+                    : modelData.label + " (" + modelData.key + ")"
                   selected: root.selectedScopeId === modelData.key
                   bordered: true
-                  fontSize: Style.font.caption
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  horizontalPadding: Style.spacing.controlPaddingX
+                  fontSize: Style.font.bodySmall
+                  horizontalPadding: Style.space(4)
                   verticalPadding: Style.spacing.controlPaddingY
                   onClicked: root.selectedScopeId = modelData.key
                 }
