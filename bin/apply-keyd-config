@@ -22,15 +22,16 @@ case "$pending" in
 esac
 [[ -f $pending ]] || { echo "apply-keyd-config: no such file: $pending" >&2; exit 1; }
 
-# Install a dedicated polkit action for this script so applies use
-# auth_admin_keep (one password covers a burst of toggles for a few
-# minutes) instead of re-prompting on every apply via the generic
-# org.freedesktop.policykit.exec action. pkexec resolves the action from
-# the binary path annotation, so the plugin's pkexec call is unchanged;
-# the FIRST apply (this run) still used the generic action -- retention
-# starts from the next one. Baked with this script's own resolved path
-# and rewritten if the plugin moves. Authorization level is unchanged
-# (auth_admin either way); only the retention window is new.
+# Install a dedicated polkit action for this script so the auth dialog
+# shows OUR description instead of generic exec text. NOTE: auth_admin_keep
+# does NOT reduce prompts here -- polkit keys the retained authorization
+# to the pkexec process subject (pid+start-time), and every apply is a
+# new process, so retention never carries across applies (verified live:
+# the second of two quick toggles re-prompted). Burst prompt reduction is
+# done by the debounce in Panel.qml instead. pkexec resolves the action
+# from the binary path annotation, so the plugin's pkexec call is
+# unchanged; baked with this script's own resolved path and rewritten if
+# the plugin moves.
 policy_id="com.houz42.keyboard-remapper.apply"
 policy_file="/usr/share/polkit-1/actions/$policy_id.policy"
 self_path="$(readlink -f "${BASH_SOURCE[0]}")"

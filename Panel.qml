@@ -1141,6 +1141,12 @@ Panel {
           Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "-u", "critical", "Keyboard Remapper", root.lastMessage])
         }
         root.refreshNow()
+        // A toggle landed mid-apply: drain one follow-up with the latest
+        // state instead of leaving drift for a manual Re-apply.
+        if (root.applyAgain) {
+          root.applyAgain = false
+          root.applyRules()
+        }
       }
     }
 
@@ -1153,15 +1159,34 @@ Panel {
     }
   }
 
+  // Applies are debounced so a burst of toggles coalesces into ONE pkexec
+  // prompt: each toggle reschedules the timer and the final state is
+  // applied once. (polkit's auth_admin_keep can't do this job -- the
+  // retained authorization is keyed to the pkexec PROCESS subject, and
+  // every apply is a new process.) A toggle landing mid-apply sets
+  // applyAgain and drains when the current apply finishes, so no toggle
+  // ever needs a manual Re-apply to catch up.
+  property bool applyAgain: false
+
+  Timer {
+    id: applyTimer
+    interval: 1500
+    onTriggered: {
+      root.applying = true
+      pendingFile.setText(root.renderConf())
+      applyProcess.running = true
+    }
+  }
+
   function applyRules() {
-    if (root.applying) return
-    root.applying = true
-    pendingFile.setText(root.renderConf())
-    applyProcess.running = true
+    if (root.applying) {
+      root.applyAgain = true
+      return
+    }
+    applyTimer.restart()
   }
 
   function toggleRule(rule) {
-    if (root.applying) return
     if (!root.isRuleEnabled(rule)) {
       var collision = root.enabledDuplicateError(rule)
       if (collision !== "") {
@@ -1169,6 +1194,9 @@ Panel {
         return
       }
     }
+    // Never swallow a toggle because an apply is in flight: flip the state
+    // and let applyRules mark the drain -- the state write is what
+    // matters, and the follow-up apply converges the live config.
     root.setRuleEnabled(rule.id, !root.isRuleEnabled(rule))
     root.applyRules()
   }

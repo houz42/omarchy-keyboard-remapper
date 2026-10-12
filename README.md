@@ -248,10 +248,13 @@ ordinary removable/togglable rules — per-machine and unversioned, unlike
 chezmoi-tracked `kb_options`, so migrate on each machine you want them
 on. The one-way-in-keyd vs swap semantics are preserved exactly.
 
-Applies run through a dedicated polkit action with `auth_admin_keep`, so
-one password covers a burst of toggles for a few minutes instead of
-prompting per click (installed by the apply script itself on first run;
-authorization level unchanged).
+Applies are debounced (~1.5s), so a burst of toggles coalesces into ONE
+pkexec prompt with the final state, and a toggle landing mid-apply drains
+a follow-up automatically. (polkit's `auth_admin_keep` can't do this:
+the retained authorization is keyed to the pkexec process subject and
+every apply is a new process. The dedicated polkit action the script
+installs is kept only so the dialog shows this plugin's name instead of
+generic exec text.)
 
 ## Known limitations
 
