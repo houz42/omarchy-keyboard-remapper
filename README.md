@@ -61,17 +61,20 @@ The label is always auto-generated from the keys you picked (e.g.
 it. Each rule shows a **-** button to remove it the same way, no file
 editing needed either way.
 
-Rules added from the popup are written to `user-rules.json`, next to
-`Panel.qml` — not to the tracked [`rules.json`](rules.json). This matters
-if you clone this repo yourself: `rules.json` ships the example rule and is
-part of the git history, while `user-rules.json` is gitignored, so your own
-mappings never collide with `git pull`/`omarchy plugin update`, and never
-end up committed if you fork this repo to add your own examples. The two
-files are merged at load time (a shipped rule wins if an id somehow
-collides with a user one); only rules from `user-rules.json` show a **-**
-remove button, since removing a shipped rule would just have it reappear
-on the next update anyway. Hand-editing either file directly works — the
-popup form only ever touches `user-rules.json`:
+Rules added from the popup are written to `user-rules.json` in the state
+dir (`~/.local/state/omarchy/houz42.keyboard-remapper/`), not next to
+`Panel.qml`. Two reasons: they're runtime state that must never be swept
+into a public commit of this repo, and — the load-bearing one — the
+Omarchy shell hot-reloads a plugin when any file in its directory
+changes, so writing rules there killed in-flight flows mid-apply. (A
+legacy plugin-dir `user-rules.json` is moved into the state dir on first
+load.) The shipped [`rules.json`](rules.json) is merged at load time (a
+shipped rule wins if an id somehow collides with a user one). Every rule
+shows a **-** remove button: user rules are deleted; shipped rules are
+hidden via state (a delete would just return on the next update), with a
+"Restore hidden shipped rules" link while any are hidden. Hand-editing
+either file directly works — the popup form only ever touches the state
+dir file:
 
 ```json
 {
@@ -230,17 +233,25 @@ targets the first uncommented `kb_options` assignment it finds under
 none exists it refuses rather than inventing a config block.
 
 **Migration.** Options with known semantics (the swaps and "acts as"
-mappings in the decode table) carry a "→ keyd" button, plus a "Migrate
+mappings in the decode table) carry a migrate button (→), plus a "Migrate
 all" link. Migration creates equivalent keyd rules — `swap`/`map` rule
 types, one rule per key pair — enables them, and applies (pkexec). Only
 AFTER the keyd side is live does it remove the XKB option, so the mapping
-never dies in the gap; a failed or cancelled apply rolls the created
-rules back out and keeps the option. Migrated rules are ordinary
-removable/togglable rules in `user-rules.json` — per-machine and
-unversioned, unlike chezmoi-tracked `kb_options`, so migrate on each
-machine you want them on. The one-way-in-keyd vs swap semantics are
-preserved exactly; the ~1s window between apply and option-removal has
-the mapping in both layers (flagged by the conflict warnings).
+never dies in the gap; the ~1s window between apply and option-removal has
+the mapping in both layers (flagged by the conflict warnings). A failed
+or dismissed pkexec prompt rolls nothing back: the pending migration is
+persisted in the state dir, the created rules stay, and the drift
+banner's **Re-apply** finishes the flow whenever you choose — it also
+survives shell restarts. Removing one of the migration's rules cancels
+the pending migration (the XKB option stays active). Migrated rules are
+ordinary removable/togglable rules — per-machine and unversioned, unlike
+chezmoi-tracked `kb_options`, so migrate on each machine you want them
+on. The one-way-in-keyd vs swap semantics are preserved exactly.
+
+Applies run through a dedicated polkit action with `auth_admin_keep`, so
+one password covers a burst of toggles for a few minutes instead of
+prompting per click (installed by the apply script itself on first run;
+authorization level unchanged).
 
 ## Known limitations
 

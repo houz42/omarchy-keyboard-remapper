@@ -36,11 +36,14 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string binDir: Qt.resolvedUrl("bin").toString().replace("file://", "")
   readonly property string rulesPath: Qt.resolvedUrl("rules.json").toString().replace("file://", "")
-  // Gitignored, unlike rules.json -- this plugin's own repo gets `git add -A`
-  // + pushed during development, so anything the popup writes into a
-  // tracked file risks getting swept into a public commit. Rules you add
-  // from the popup live here instead, never in the shipped/tracked file.
-  readonly property string userRulesPath: Qt.resolvedUrl("user-rules.json").toString().replace("file://", "")
+  // User rules live in the STATE DIR, not next to Panel.qml. Two reasons:
+  // they're runtime state (never to be swept into a public git commit),
+  // and -- the load-bearing one -- the omarchy shell hot-RELOADS a plugin
+  // when any file in its directory changes, so writing rules there killed
+  // every in-flight flow (a migration's pending state died mid-apply, the
+  // XKB option was never removed, and a dismissed pkexec left no retry
+  // path). The plugin-dir location is still read once for migration.
+  readonly property string legacyUserRulesPath: Qt.resolvedUrl("user-rules.json").toString().replace("file://", "")
   readonly property string keyNamesPath: Qt.resolvedUrl("keyd-keys.json").toString().replace("file://", "")
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 10)))
 
@@ -174,33 +177,62 @@ Panel {
 
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
   readonly property string pendingPath: root.stateDir + "/pending.conf"
+  readonly property string userRulesPath: root.stateDir + "/user-rules.json"
+  readonly property string migrationPath: root.stateDir + "/pending-migration.json"
+  readonly property string hiddenShippedPath: root.stateDir + "/hidden-shipped.json"
 
   // Rule catalog: shipped/tracked rules.json (read-only from this plugin's
-  // own perspective -- never written by the popup) merged with gitignored
-  // user-rules.json (the popup's own scratch space). Each entry: {id, label,
-  // description?, source, holdLayer, tap, defaultEnabled?}, plus a
-  // runtime-only _removable flag added at merge time (not persisted) so the
-  // UI only offers to remove rules the popup itself can safely delete.
+  // own perspective -- never written by the popup) merged with the state
+  // dir's user-rules.json (the popup's own scratch space). Each entry:
+  // {id, label, description?, type?, source, holdLayer?, tap?, target?,
+  // devices?, defaultEnabled?}. A shipped rule "removed" from the popup
+  // isn't deleted from rules.json (read-only, would return on update) --
+  // its id goes to hiddenShipped in the state dir instead; a restore link
+  // appears in the popup while any are hidden.
   property var shippedRules: []
   property var userRules: []
   property var rules: []
+  property var hiddenShipped: []
 
   function recomputeRules() {
     var shippedIds = {}
-    var merged = root.shippedRules.map(function(r) {
+    var merged = []
+    root.shippedRules.forEach(function(r) {
       shippedIds[r.id] = true
-      return Object.assign({}, r, { _removable: false })
+      if (root.hiddenShipped.indexOf(r.id) !== -1) return
+      merged.push(Object.assign({}, r))
     })
     root.userRules.forEach(function(r) {
       // A shipped rule re-adding the same id (e.g. after a plugin update)
       // wins over a same-id user rule, so an upstream default can't be
       // silently shadowed by stale local state.
       if (shippedIds[r.id]) return
-      merged.push(Object.assign({}, r, { _removable: true }))
+      merged.push(Object.assign({}, r))
     })
     root.rules = merged
     root.syncPendingFile()
     root.refreshNow()
+  }
+
+  FileView {
+    id: hiddenShippedFile
+    path: root.hiddenShippedPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        root.hiddenShipped = Array.isArray(parsed) ? parsed : []
+      } catch (e) {
+        root.hiddenShipped = []
+      }
+      root.recomputeRules()
+    }
+    onLoadFailed: {
+      root.hiddenShipped = []
+    }
+    onFileChanged: reload()
   }
 
   // Per-rule on/off state, keyed by rule id -- kept separate from rules.json
@@ -486,7 +518,9 @@ Panel {
 
   FileView {
     id: userRulesFile
-    path: root.userRulesPath
+    // Assigned by ensureStateDirProcess after the legacy-plugin-dir
+    // migration check; loading before that could read a stale location.
+    path: ""
     watchChanges: true
     atomicWrites: true
     printErrors: false
@@ -594,13 +628,34 @@ Panel {
     return ""
   }
 
+  // Removing a USER rule deletes it from user-rules.json; removing a
+  // SHIPPED rule hides it via state (rules.json is read-only and a deleted
+  // rule would return on the next plugin update). Either way its toggle
+  // state is dropped, and if it belonged to a pending migration the whole
+  // migration cancels (its XKB options stay active).
   function removeRule(id) {
-    root.saveUserRules(root.userRules.filter(function(r) { return r.id !== id }))
+    var shipped = false
+    for (var i = 0; i < root.shippedRules.length; i++) {
+      if (root.shippedRules[i].id === id) { shipped = true; break }
+    }
+    if (shipped) {
+      var hidden = root.hiddenShipped.concat([id])
+      root.hiddenShipped = hidden
+      hiddenShippedFile.setText(JSON.stringify(hidden, null, 2) + "\n")
+      root.recomputeRules()
+    } else {
+      root.saveUserRules(root.userRules.filter(function(r) { return r.id !== id }))
+    }
     if (root.enabledById[id] !== undefined) {
       var next = Object.assign({}, root.enabledById)
       delete next[id]
       root.enabledById = next
       enabledStateFile.setText(JSON.stringify(next, null, 2) + "\n")
+    }
+    var mig = root.pendingXkbMigration
+    if (mig && mig.ruleIds && mig.ruleIds.indexOf(id) !== -1) {
+      root.setPendingMigration(null)
+      root.lastMessage = "Pending migration cancelled; its XKB options stay active."
     }
   }
 
@@ -620,8 +675,14 @@ Panel {
   Process {
     id: ensureStateDirProcess
     running: true
-    command: ["mkdir", "-p", root.stateDir]
-    onExited: root.refreshNow()
+    // One-time move of the legacy plugin-dir user-rules.json into the
+    // state dir; the userRulesFile's path stays empty until this exits so
+    // the catalog never loads the not-yet-migrated location.
+    command: ["bash", "-c", "mkdir -p \"$3\" && if [ -f \"$1\" ] && [ ! -f \"$2\" ]; then mv \"$1\" \"$2\"; fi", "--", root.legacyUserRulesPath, root.userRulesPath, root.stateDir]
+    onExited: {
+      userRulesFile.path = root.userRulesPath
+      root.refreshNow()
+    }
   }
 
   Process {
@@ -890,13 +951,40 @@ Panel {
   //
   // Two phases with the pkexec apply in between, in the only safe order:
   // create+enable the keyd rules and APPLY them first, remove the XKB option
-  // only after the keyd side is live. Reversing it (or removing on failure)
-  // would leave the mapping dead in the gap. A failed/cancelled apply rolls
-  // the created rules back out, so state returns exactly to pre-migration.
-  // The brief window between apply and option-removal has the mapping in
-  // BOTH layers (double-map) -- the conflict warnings flag it, and it lasts
-  // about a second.
+  // only after the keyd side is live. The pending migration is PERSISTED in
+  // the state dir: a failed or dismissed pkexec no longer rolls anything
+  // back -- the rules stay, the drift banner's Re-apply resumes the flow,
+  // and phase 2 fires whenever an apply eventually succeeds. (An earlier
+  // design held this state in memory and rolled back on failure; the shell
+  // hot-reloads the plugin on plugin-dir writes, which wiped that memory
+  // mid-flow and stranded migrations -- hence files, and hence
+  // user-rules.json moving into the unwatched state dir.)
   property var pendingXkbMigration: null
+
+  FileView {
+    id: migrationFile
+    path: root.migrationPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        root.pendingXkbMigration = (parsed && Array.isArray(parsed.tokens) && parsed.tokens.length > 0) ? parsed : null
+      } catch (e) {
+        root.pendingXkbMigration = null
+      }
+    }
+    onLoadFailed: {
+      root.pendingXkbMigration = null
+    }
+    onFileChanged: reload()
+  }
+
+  function setPendingMigration(mig) {
+    root.pendingXkbMigration = mig
+    migrationFile.setText(JSON.stringify(mig || {}, null, 2) + "\n")
+  }
 
   // The rules produced from one XKB option token: one rule per key pair so
   // each side stays independently removable afterwards. Swaps become the
@@ -937,7 +1025,10 @@ Panel {
       root.lastMessage = "Migration refused: " + collision
       return
     }
-    root.pendingXkbMigration = { tokens: tokens, ruleIds: newRules.map(function(r) { return r.id }) }
+    // Persist BEFORE writing the rules: the state survives a shell restart
+    // or plugin reload, and the apply handler completes phase 2 whenever an
+    // apply eventually succeeds.
+    root.setPendingMigration({ tokens: tokens, ruleIds: newRules.map(function(r) { return r.id }) })
     var next = root.userRules.concat(newRules)
     root.saveUserRules(next)
     // Mirrors setRuleEnabled's pattern: update in-memory state synchronously
@@ -946,18 +1037,6 @@ Panel {
     root.userRules = next
     root.recomputeRules()
     root.applyRules()
-  }
-
-  function rollbackMigration() {
-    var mig = root.pendingXkbMigration
-    if (!mig) return
-    var drop = {}
-    mig.ruleIds.forEach(function(id) { drop[id] = true })
-    var next = root.userRules.filter(function(r) { return !drop[r.id] })
-    root.pendingXkbMigration = null
-    root.saveUserRules(next)
-    root.userRules = next
-    root.recomputeRules()
   }
 
   FileView {
@@ -1002,16 +1081,16 @@ Panel {
           root.lastMessage = detail !== "" ? ("Apply failed: " + detail) : "Apply failed — see notification."
         }
         // Migration phase 2: the XKB options come out ONLY after the keyd
-        // side is live. On failure the created rules roll back, restoring
-        // the exact pre-migration state (XKB options untouched either way).
+        // side is live. On failure/cancel NOTHING rolls back -- the pending
+        // migration is persisted, the drift banner's Re-apply is the retry
+        // path, and phase 2 fires on whichever apply eventually succeeds.
         var mig = root.pendingXkbMigration
         if (mig) {
           if (ok) {
-            root.pendingXkbMigration = null
+            root.setPendingMigration(null)
             root.removeXkbOptions(mig.tokens)
           } else {
-            root.rollbackMigration()
-            root.lastMessage = "Migration aborted, XKB options kept. " + root.lastMessage
+            root.lastMessage = "Migration pending: rules kept, XKB options still active. Use Re-apply to finish. " + root.lastMessage
           }
         }
         Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper", root.lastMessage])
@@ -1281,13 +1360,8 @@ Panel {
                   anchors.right: ruleToggle.visible ? ruleToggle.left : parent.right
                   anchors.rightMargin: (visible && ruleToggle.visible) ? Style.space(6) : 0
                   anchors.verticalCenter: parent.verticalCenter
-                  // Only rules added from this popup (user-rules.json) can
-                  // be removed here -- shipped/example rules from the
-                  // tracked rules.json can be toggled off but not deleted
-                  // (deleting one would just come back on the next `git
-                  // pull`/plugin update anyway).
-                  visible: ruleRow.modelData._removable === true
-                  width: visible ? size : 0
+                  // Every rule is removable: user rules are deleted, shipped
+                  // rules are hidden via state (see removeRule).
                   iconText: "-"
                   tooltipText: "Remove " + (ruleRow.modelData.label || ruleRow.modelData.id)
                   foreground: root.foreground
@@ -1314,21 +1388,43 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
-              Text {
+              Row {
+                spacing: Style.space(12)
                 visible: !addRuleForm.visible
-                text: "+ Add rule"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
 
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    // Opened from a scope tab -> preset that device, so a
-                    // rule added from the Milsky tab lands on the Milsky.
-                    deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
-                    addRuleForm.visible = true
+                Text {
+                  text: "+ Add rule"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      // Opened from a scope tab -> preset that device, so a
+                      // rule added from the Milsky tab lands on the Milsky.
+                      deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
+                      addRuleForm.visible = true
+                    }
+                  }
+                }
+
+                Text {
+                  visible: root.hiddenShipped.length > 0
+                  text: "Restore " + root.hiddenShipped.length + " hidden shipped rule" + (root.hiddenShipped.length === 1 ? "" : "s")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      root.hiddenShipped = []
+                      hiddenShippedFile.setText("[]\n")
+                      root.recomputeRules()
+                    }
                   }
                 }
               }

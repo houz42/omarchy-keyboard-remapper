@@ -22,6 +22,40 @@ case "$pending" in
 esac
 [[ -f $pending ]] || { echo "apply-keyd-config: no such file: $pending" >&2; exit 1; }
 
+# Install a dedicated polkit action for this script so applies use
+# auth_admin_keep (one password covers a burst of toggles for a few
+# minutes) instead of re-prompting on every apply via the generic
+# org.freedesktop.policykit.exec action. pkexec resolves the action from
+# the binary path annotation, so the plugin's pkexec call is unchanged;
+# the FIRST apply (this run) still used the generic action -- retention
+# starts from the next one. Baked with this script's own resolved path
+# and rewritten if the plugin moves. Authorization level is unchanged
+# (auth_admin either way); only the retention window is new.
+policy_id="com.houz42.keyboard-remapper.apply"
+policy_file="/usr/share/polkit-1/actions/$policy_id.policy"
+self_path="$(readlink -f "${BASH_SOURCE[0]}")"
+read -r -d '' policy_wanted <<EOF || true
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <action id="$policy_id">
+    <description>Apply keyboard-remapper keyd configuration</description>
+    <message>Authentication is required to apply keyboard-remapper's keyd configuration</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">$self_path</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+EOF
+if [[ ! -f $policy_file ]] || ! printf '%s\n' "$policy_wanted" | cmp -s - "$policy_file"; then
+  printf '%s\n' "$policy_wanted" > "$policy_file.tmp"
+  mv "$policy_file.tmp" "$policy_file"
+fi
+
 if ! command -v keyd >/dev/null 2>&1; then
   pacman -S --noconfirm --needed keyd
 fi
