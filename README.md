@@ -143,7 +143,7 @@ something manually restarts it. The first apply installs a systemd drop-in
 `Restart=on-failure` / `RestartSec=1`) so a future crash self-heals in about
 a second instead of requiring you to reopen the popup and hit Re-apply.
 
-## XKB awareness (read-only)
+## XKB awareness, editing, and migration
 
 `keyd` sits *below* the compositor's XKB layer in the input stack: every
 key a rule emits is re-interpreted by Hyprland's `kb_options` before any
@@ -154,16 +154,38 @@ the exact opposite of the rule's label.
 
 The popup reads the compositor's **live** `kb_options` (`hyprctl getoption
 input:kb_options`, which reflects the running value even under Quattro/Lua
-configs) and shows them in a read-only "XKB — via Hyprland" section next
-to the keyd rules. When an enabled rule's `tap` key or hold-layer modifier
-is remapped by one of those options, the rule row shows an amber warning
+configs — stale `*.conf` siblings and multi-block Lua configs never
+confuse it) and shows them in an "XKB — via Hyprland" section next to the
+keyd rules. When an enabled rule's `tap` key or hold-layer modifier is
+remapped by one of those options, the rule row shows an amber warning
 ("hold emits leftalt → compositor sees leftmeta") and the bar icon
 switches to ⚠. A rule's `source` key is never flagged: keyd consumes it at
 evdev level, before XKB runs, so swaps can't change a rule's input side.
 
-These options are owned by your Hyprland config — the plugin never writes
-them. Note the live value is read, not the config files, so stale `*.conf`
-siblings and multi-block Lua configs don't confuse it.
+**Editing.** Options can be removed (−) or added from the popup. That
+rewrites the `kb_options` value in your Hyprland config in place
+(`bin/set-xkb-options`, non-privileged — it's a user-owned file, no
+pkexec), preserving the file's quoting style and leaving a
+`<file>.kbremapper.bak` next to it; Hyprland auto-reloads on the write. If
+the file is chezmoi-tracked as a plain file, the change is folded back
+into the source with `chezmoi re-add` so the next `chezmoi apply` doesn't
+revert it (template sources are reported, never clobbered). The writer
+targets the first uncommented `kb_options` assignment it finds under
+`~/.config/hypr/` (input.lua, hyprland.lua, other *.lua, then *.conf); if
+none exists it refuses rather than inventing a config block.
+
+**Migration.** Options with known semantics (the swaps and "acts as"
+mappings in the decode table) carry a "→ keyd" button, plus a "Migrate
+all" link. Migration creates equivalent keyd rules — `swap`/`map` rule
+types, one rule per key pair — enables them, and applies (pkexec). Only
+AFTER the keyd side is live does it remove the XKB option, so the mapping
+never dies in the gap; a failed or cancelled apply rolls the created
+rules back out and keeps the option. Migrated rules are ordinary
+removable/togglable rules in `user-rules.json` — per-machine and
+unversioned, unlike chezmoi-tracked `kb_options`, so migrate on each
+machine you want them on. The one-way-in-keyd vs swap semantics are
+preserved exactly; the ~1s window between apply and option-removal has
+the mapping in both layers (flagged by the conflict warnings).
 
 ## Known limitations
 
@@ -171,10 +193,12 @@ siblings and multi-block Lua configs don't confuse it.
   tmux, etc.), avoid F13–F24 — see "Why" above for the Shift-F1–F12
   collision. This isn't fixable in `keyd`/this plugin; it's how terminal
   emulators encode those keys.
-- Never enable two rules that share the same `source` key: keyd rejects
-  duplicate bindings in one layer, so the apply would restart `keyd` into
-  a failed service and every remap dies until the config is fixed. The
-  popup doesn't guard against this combination yet.
+- Two enabled rules can never share a bound source key (for a `swap` rule,
+  that's BOTH of its keys): keyd doesn't reject duplicates — one binding
+  silently wins and the other rule does nothing. The popup refuses the
+  combination at add/enable/migrate time; hand-edited `user-rules.json`
+  duplicates are NOT guarded (the apply-side `keyd check` gate passes
+  duplicates too, since keyd itself accepts them).
 - The XKB conflict check decodes the common remapping options
   (`altwin:swap_*`, `caps:*`, `ctrl:swap_*`); unlisted `kb_options`
   tokens are shown raw and never flagged.

@@ -1,0 +1,117 @@
+#!/bin/bash
+# Rewrites the kb_options value in the user's Hyprland config. NON-privileged:
+# the file is user-owned (unlike /etc/keyd), so no pkexec -- and Hyprland
+# auto-reloads on the write, so the new value goes live on its own.
+#
+# Usage: set-xkb-options <new-options-string>   (e.g. "caps:escape,altwin:swap_alt_win")
+#
+# Locates the first UNCOMMENTED kb_options assignment across
+# ~/.config/hypr/{input.lua,hyprland.lua,*.lua,input.conf,hyprland.conf,*.conf}
+# in that deterministic order, rewrites its value in place (preserving the
+# file's quoting style and indent), and leaves a one-shot backup at
+# <file>.kbremapper.bak. If the file is chezmoi-tracked as a plain
+# (non-template) file, `chezmoi re-add` folds the edit back into the source
+# so the next `chezmoi apply` doesn't stomp it; template sources are left
+# alone and reported, since re-adding would destroy the template.
+#
+# Prints one JSON object on stdout; never prints rule text or file contents.
+
+set -euo pipefail
+
+new="${1:?usage: set-xkb-options <new-options-string>}"
+
+# Strict token charset: letters, digits, colon, comma, underscore. Anything
+# else (quote, space, backslash, $) could break out of the config string.
+# Empty is valid -- it means "no options".
+if [[ ! $new =~ ^[a-zA-Z0-9_:,]*$ ]]; then
+  jq -nc '{ok: false, error: "invalid characters in options string"}'
+  exit 1
+fi
+
+hypr_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+candidates=("$hypr_dir/input.lua" "$hypr_dir/hyprland.lua")
+while IFS= read -r f; do candidates+=("$f"); done < <(find "$hypr_dir" -maxdepth 1 -name '*.lua' ! -name 'input.lua' ! -name 'hyprland.lua' 2>/dev/null | sort)
+candidates+=("$hypr_dir/input.conf" "$hypr_dir/hyprland.conf")
+while IFS= read -r f; do candidates+=("$f"); done < <(find "$hypr_dir" -maxdepth 1 -name '*.conf' ! -name 'input.conf' ! -name 'hyprland.conf' 2>/dev/null | sort)
+
+target=""
+for f in "${candidates[@]}"; do
+  [[ -f $f ]] || continue
+  # Commented assignments start with -- or #, so an assignment anchored after
+  # optional whitespace only is uncommented. (Inline `--[[ ]]` block-comment
+  # bodies aren't seen as comments by this test -- documented limitation.)
+  if grep -qE '^[[:space:]]*kb_options[[:space:]]*=' "$f"; then
+    target="$f"
+    break
+  fi
+done
+
+if [[ -z $target ]]; then
+  jq -nc '{ok: false, error: "no uncommented kb_options assignment found under ~/.config/hypr"}'
+  exit 1
+fi
+
+# Quoting style of THIS file's assignment: Lua files quote the value, classic
+# hyprland.conf leaves it bare.
+quoted="false"
+if grep -qE '^[[:space:]]*kb_options[[:space:]]*=[[:space:]]*"' "$target"; then
+  quoted="true"
+fi
+
+cp "$target" "$target.kbremapper.bak"
+
+tmp="$target.kbremapper.tmp"
+if [[ $quoted == "true" ]]; then
+  # Replace ONLY the quoted value, never the whole line: Lua table fields
+  # carry a trailing comma (and possibly a comment) that a full-line rewrite
+  # silently drops -- the resulting syntax error kills the compositor's
+  # config reload and drops the user's whole input block (verified live).
+  awk -v new="$new" '
+    !done && /^[ \t]*kb_options[ \t]*=/ {
+      sub(/kb_options[ \t]*=[ \t]*"[^"]*"/, "kb_options = \"" new "\"")
+      done=1
+    }
+    { print }
+  ' "$target" > "$tmp"
+else
+  # Classic hyprland.conf: bare value runs to end of line, no commas.
+  awk -v new="$new" '
+    !done && /^[ \t]*kb_options[ \t]*=/ {
+      sub(/kb_options[ \t]*=[ \t]*.*$/, "kb_options = " new)
+      done=1
+    }
+    { print }
+  ' "$target" > "$tmp"
+fi
+mv "$tmp" "$target"
+
+# Fold the edit into chezmoi when the file is tracked as a plain file, so the
+# next `chezmoi apply` doesn't silently revert it. Template sources (.tmpl)
+# must NOT be re-added (that would overwrite the template with rendered
+# content) -- reported so the popup can tell the user to edit the template.
+chezmoi_state="untracked"
+chezmoi_bin=""
+if command -v chezmoi >/dev/null 2>&1; then
+  chezmoi_bin="chezmoi"
+elif [[ -x /usr/bin/chezmoi ]]; then
+  chezmoi_bin="/usr/bin/chezmoi"
+fi
+if [[ -n $chezmoi_bin ]]; then
+  src="$("$chezmoi_bin" source-path "$target" 2>/dev/null || true)"
+  if [[ -n $src && $src != *.tmpl ]]; then
+    if "$chezmoi_bin" re-add "$target" >/dev/null 2>&1; then
+      chezmoi_state="readded"
+    else
+      chezmoi_state="readd-failed"
+    fi
+  elif [[ -n $src ]]; then
+    chezmoi_state="template-skipped"
+  fi
+fi
+
+jq -nc \
+  --arg file "$target" \
+  --arg opts "$new" \
+  --arg cm "$chezmoi_state" \
+  --argjson ok true \
+  '{ok: $ok, file: $file, options: $opts, chezmoi: $cm}'

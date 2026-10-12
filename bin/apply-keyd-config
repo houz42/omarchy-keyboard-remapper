@@ -26,6 +26,21 @@ if ! command -v keyd >/dev/null 2>&1; then
   pacman -S --noconfirm --needed keyd
 fi
 
+# Validate the rendered config BEFORE touching the live one. `keyd check`
+# exits non-zero on ANY warning, including the idiomatic "use layer(...)
+# instead of assigning the modifier directly" note that plain map/swap
+# rules produce ON PURPOSE (direct assignment is the correct XKB-parity
+# translation). Those pass; every other diagnostic (e.g. "not a valid key
+# or alias", which would silently drop the binding at load) refuses the
+# apply instead of writing a conf with dead rules into /etc/keyd.
+if ! check_out="$(keyd check "$pending" 2>&1)"; then
+  bad="$(printf '%s\n' "$check_out" | grep -vE '^[[:space:]]*(WARNING: .*: You should use layer\(|Parsing |No errors found|$)' || true)"
+  if [[ -n $bad ]]; then
+    jq -nc --arg err "$bad" '{ok: false, error: ("keyd config validation failed: " + $err)}'
+    exit 1
+  fi
+fi
+
 # keyd's stock unit has no Restart= directive at all, so a crash (keyd has
 # known SIGSEGV bugs with some HID devices -- YubiKeys and multi-receiver
 # dongles among them) leaves the service dead until something manually

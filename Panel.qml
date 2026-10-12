@@ -10,13 +10,13 @@ import qs.Ui
 // mappings (or the README's "Add your own mappings" section). Ships with
 // one rule: a standalone tap of the physical Alt key emits F12 (bound to
 // herdr's prefix), while holding Alt still passes through as a normal
-// modifier for every existing Hyprland/herdr Alt-chord. CapsLock<->Ctrl and
-// Win<->Alt stay owned by Hyprland's own XKB config -- this plugin never
-// touches them, but it DOES read the compositor's live kb_options and shows
-// them alongside the keyd rules (see the XKB section below): keyd sits below
-// XKB in the input stack, so a rule whose EMITTED key is re-mapped by an XKB
-// option silently produces a third key at the compositor, and the popup
-// flags that class of double-map instead of letting it "apply" invisibly.
+// modifier for every existing Hyprland/herdr Alt-chord. Hyprland's XKB
+// config stays the owner of its own kb_options, but the popup reads the
+// compositor's LIVE value, shows it next to the keyd rules, flags the
+// double-map class (keyd sits below XKB, so a rule whose EMITTED key is
+// re-mapped by an XKB option silently produces a third key at the
+// compositor), and can edit options or MIGRATE them into equivalent keyd
+// rules (map/swap types) -- see the XKB section below.
 //
 // All root-owned mutation (installing keyd, writing /etc/keyd/*.conf,
 // (re)starting the service) happens through exactly one fixed-argv pkexec
@@ -192,14 +192,74 @@ Panel {
   // pendingPath (below) both right before an apply AND on every status
   // refresh, so bin/check-keyd-status never needs to know the rule format
   // itself -- it just compares the live /etc/keyd conf against this file.
+  //
+  // Rule types: "overload" (tap/hold, the original shape: source/holdLayer/
+  // tap), "map" (plain one-way source -> target), and "swap" (bidirectional
+  // source <-> target, emitted as two bindings). map/swap exist so XKB
+  // options like caps:escape or altwin:swap_alt_win can migrate into keyd
+  // rules 1:1 -- overloads can't express them. A rule without a `type`
+  // field is an overload (schema back-compat).
   function renderConf() {
     var lines = "[ids]\n*\n\n[main]\n"
     for (var i = 0; i < root.rules.length; i++) {
       var rule = root.rules[i]
       if (!root.isRuleEnabled(rule)) continue
-      lines += rule.source + " = overload(" + rule.holdLayer + ", " + rule.tap + ")\n"
+      lines += root.ruleSyntax(rule) + "\n"
     }
     return lines
+  }
+
+  function ruleSyntax(rule) {
+    var type = rule.type || "overload"
+    if (type === "map") return rule.source + " = " + rule.target
+    if (type === "swap") return rule.source + " = " + rule.target + "\n" + rule.target + " = " + rule.source
+    return rule.source + " = overload(" + rule.holdLayer + ", " + rule.tap + ")"
+  }
+
+  // Keys a rule BINDS (consumes). keyd does NOT reject duplicate bindings
+  // in a layer -- `keyd check` passes them and one binding silently wins,
+  // shadowing the other rule with no error anywhere. Overlapping sources
+  // are refused up front instead of discovered as a rule that "applies"
+  // but does nothing. Note a swap binds BOTH of its keys; targets may
+  // repeat freely.
+  function boundSources(rule) {
+    return (rule.type || "overload") === "swap" ? [rule.source, rule.target] : [rule.source]
+  }
+
+  // First source collision between candidate rules and the WHOLE catalog
+  // (enabled or not -- a dormant duplicate is a trap armed for later), or
+  // "" when clean. Used when creating rules.
+  function duplicateError(candidates) {
+    var taken = {}
+    for (var i = 0; i < root.rules.length; i++) {
+      var r = root.rules[i]
+      root.boundSources(r).forEach(function(s) { taken[s] = r.label || r.id })
+    }
+    for (var c = 0; c < candidates.length; c++) {
+      var srcs = root.boundSources(candidates[c])
+      for (var s = 0; s < srcs.length; s++) {
+        if (taken[srcs[s]] !== undefined)
+          return "Source key " + srcs[s] + " is already bound by '" + taken[srcs[s]] + "' — two rules can't bind the same key (keyd would silently keep only one)."
+        taken[srcs[s]] = candidates[c].label || candidates[c].id
+      }
+    }
+    return ""
+  }
+
+  // Collision of one rule against the ENABLED set only -- the check that
+  // runs when toggling a rule on, since keyd only ever sees enabled rules.
+  function enabledDuplicateError(rule) {
+    var srcs = root.boundSources(rule)
+    for (var i = 0; i < root.rules.length; i++) {
+      var other = root.rules[i]
+      if (other.id === rule.id || !root.isRuleEnabled(other)) continue
+      var otherSrcs = root.boundSources(other)
+      for (var a = 0; a < srcs.length; a++) {
+        if (otherSrcs.indexOf(srcs[a]) !== -1)
+          return "Can't enable: " + srcs[a] + " is already bound by enabled rule '" + (other.label || other.id) + "' — keyd would silently keep only one of them."
+      }
+    }
+    return ""
   }
 
   function syncPendingFile() {
@@ -277,28 +337,44 @@ Panel {
   }
 
   // Validates and appends one rule from the "Add rule" form. Returns an
-  // error string, or "" on success. source/holdLayer/tap are required --
-  // they're what actually drives the keyd config. label is always
-  // auto-generated from source+tap (no manual field for it -- it's fully
-  // derivable, so asking for it is one more thing to type for no benefit);
-  // description is the only free-text, optional field.
+  // error string, or "" on success. Which key fields are required depends
+  // on the type (overload: source/holdLayer/tap; map & swap: source/target).
+  // label is always auto-generated from the keys (no manual field for it --
+  // it's fully derivable, so asking for it is one more thing to type for no
+  // benefit); description is the only free-text, optional field.
   function addRule(fields) {
+    var type = String(fields.type || "overload")
     var source = String(fields.source || "").trim()
-    var holdLayer = String(fields.holdLayer || "").trim()
-    var tap = String(fields.tap || "").trim()
-    if (source === "" || holdLayer === "" || tap === "") {
-      return "Source, hold layer, and tap key are all required."
-    }
     var description = String(fields.description || "").trim()
     var rule = {
-      id: root.uniqueRuleId(root.slugify(source + "-" + tap)),
-      label: source + " tap → " + tap,
+      id: "",
       description: description,
+      type: type,
       source: source,
-      holdLayer: holdLayer,
-      tap: tap,
       defaultEnabled: false
     }
+    if (type === "map" || type === "swap") {
+      var target = String(fields.target || "").trim()
+      if (source === "" || target === "") {
+        return "Source and target keys are both required."
+      }
+      rule.target = target
+      rule.label = source + (type === "swap" ? " ⇄ " : " → ") + target
+      rule.id = root.uniqueRuleId(root.slugify(source + "-" + target))
+    } else {
+      rule.type = "overload"
+      var holdLayer = String(fields.holdLayer || "").trim()
+      var tap = String(fields.tap || "").trim()
+      if (source === "" || holdLayer === "" || tap === "") {
+        return "Source, hold layer, and tap key are all required."
+      }
+      rule.holdLayer = holdLayer
+      rule.tap = tap
+      rule.label = source + " tap → " + tap
+      rule.id = root.uniqueRuleId(root.slugify(source + "-" + tap))
+    }
+    var collision = root.duplicateError([rule])
+    if (collision !== "") return collision
     root.saveUserRules(root.userRules.concat([rule]))
     return ""
   }
@@ -442,7 +518,9 @@ Panel {
     var seen = {}
     var tokens = root.xkbOptionsRaw === "" ? [] : root.xkbOptionsRaw.split(",")
     for (var t = 0; t < tokens.length; t++) {
-      var entry = root.xkbOptionTable[tokens[t].trim()]
+      var token = tokens[t].trim()
+      if (!Object.prototype.hasOwnProperty.call(root.xkbOptionTable, token)) continue
+      var entry = root.xkbOptionTable[token]
       if (!entry) continue
       var i
       if (entry.swaps) for (i = 0; i < entry.swaps.length; i++) {
@@ -464,8 +542,8 @@ Panel {
     for (var i = 0; i < tokens.length; i++) {
       var token = tokens[i].trim()
       if (token === "") continue
-      var entry = root.xkbOptionTable[token]
-      rows.push({ token: token, label: entry ? entry.label : "" })
+      var known = Object.prototype.hasOwnProperty.call(root.xkbOptionTable, token)
+      rows.push({ token: token, label: known ? root.xkbOptionTable[token].label : "", migratable: known })
     }
     return rows
   }
@@ -496,6 +574,174 @@ Panel {
     return n
   }
 
+  // ----- XKB option editing (writes the user's Hyprland config) -----
+  //
+  // Hyprland auto-reloads on the config write, so the change goes live on
+  // its own; the post-write timer just forces an early re-read instead of
+  // waiting for the next poll tick.
+  property bool xkbApplying: false
+  property string xkbPendingOptions: ""
+
+  Process {
+    id: xkbSetProcess
+    running: false
+    command: [root.binDir + "/set-xkb-options", root.xkbPendingOptions]
+    property string stderrText: ""
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.xkbApplying = false
+        var msg
+        try {
+          var payload = JSON.parse(String(text || "").trim())
+          if (payload.ok === true) {
+            msg = "kb_options updated in " + String(payload.file || "?").split("/").pop()
+            if (payload.chezmoi === "readded") msg += " (chezmoi re-added)"
+            else if (payload.chezmoi === "template-skipped") msg += " — chezmoi TEMPLATE source not updated, edit it by hand"
+            else if (payload.chezmoi === "readd-failed") msg += " — chezmoi re-add FAILED, run 'chezmoi re-add' yourself"
+          } else {
+            msg = "XKB update failed: " + (payload.error || "unknown error")
+          }
+        } catch (e) {
+          msg = "XKB update failed (no result from writer)"
+        }
+        root.lastMessage = msg
+        root.refreshNow()
+        xkbPostWriteTimer.restart()
+      }
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { xkbSetProcess.stderrText = text }
+    }
+  }
+
+  Timer {
+    id: xkbPostWriteTimer
+    interval: 2000
+    onTriggered: root.refreshNow()
+  }
+
+  function xkbTokensNow() {
+    if (root.xkbOptionsRaw === "") return []
+    return root.xkbOptionsRaw.split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
+  }
+
+  function setXkbOptions(tokens) {
+    if (root.xkbApplying) return
+    root.xkbApplying = true
+    root.xkbPendingOptions = tokens.join(",")
+    xkbSetProcess.running = true
+  }
+
+  function removeXkbOptions(tokens) {
+    var drop = {}
+    tokens.forEach(function(t) { drop[t] = true })
+    root.setXkbOptions(root.xkbTokensNow().filter(function(t) { return !drop[t] }))
+  }
+
+  function removeXkbOption(token) {
+    root.removeXkbOptions([token])
+  }
+
+  function addXkbOption(token) {
+    token = String(token || "").trim()
+    if (token === "" || root.xkbTokensNow().indexOf(token) !== -1) return
+    root.setXkbOptions(root.xkbTokensNow().concat([token]))
+  }
+
+  function xkbAddableOptions() {
+    var now = {}
+    root.xkbTokensNow().forEach(function(t) { now[t] = true })
+    var out = []
+    for (var k in root.xkbOptionTable) {
+      if (Object.prototype.hasOwnProperty.call(root.xkbOptionTable, k) && !now[k]) out.push(k)
+    }
+    return out.sort()
+  }
+
+  function xkbMigratableTokens() {
+    return root.xkbTokensNow().filter(function(t) {
+      return Object.prototype.hasOwnProperty.call(root.xkbOptionTable, t)
+    })
+  }
+
+  // ----- XKB option -> keyd rule migration -----
+  //
+  // Two phases with the pkexec apply in between, in the only safe order:
+  // create+enable the keyd rules and APPLY them first, remove the XKB option
+  // only after the keyd side is live. Reversing it (or removing on failure)
+  // would leave the mapping dead in the gap. A failed/cancelled apply rolls
+  // the created rules back out, so state returns exactly to pre-migration.
+  // The brief window between apply and option-removal has the mapping in
+  // BOTH layers (double-map) -- the conflict warnings flag it, and it lasts
+  // about a second.
+  property var pendingXkbMigration: null
+
+  // The rules produced from one XKB option token: one rule per key pair so
+  // each side stays independently removable afterwards. Swaps become the
+  // bidirectional "swap" type (one row covers both directions); one-way
+  // "acts as" options become "map" rules.
+  function xkbRulesFor(token) {
+    if (!Object.prototype.hasOwnProperty.call(root.xkbOptionTable, token)) return []
+    var entry = root.xkbOptionTable[token]
+    var pairs = entry.swaps ? entry.swaps : entry.maps
+    var type = entry.swaps ? "swap" : "map"
+    var rules = []
+    for (var i = 0; i < pairs.length; i++) {
+      var a = pairs[i][0], b = pairs[i][1]
+      rules.push({
+        id: root.uniqueRuleId(root.slugify("xkb-" + a + "-" + b)),
+        label: a + (type === "swap" ? " ⇄ " : " → ") + b,
+        description: "Migrated from XKB option " + token,
+        type: type,
+        source: a,
+        target: b,
+        defaultEnabled: true
+      })
+    }
+    return rules
+  }
+
+  function migrateXkbOptions(tokens) {
+    if (root.applying || root.xkbApplying || root.pendingXkbMigration) return
+    tokens = tokens.filter(function(t) { return root.xkbMigratableTokens().indexOf(t) !== -1 })
+    if (tokens.length === 0) return
+    var newRules = []
+    for (var t = 0; t < tokens.length; t++) newRules = newRules.concat(root.xkbRulesFor(tokens[t]))
+    if (newRules.length === 0) return
+    // Refuse the whole batch on any source collision with the catalog -- a
+    // half-migrated set is worse than none.
+    var collision = root.duplicateError(newRules)
+    if (collision !== "") {
+      root.lastMessage = "Migration refused: " + collision
+      return
+    }
+    root.pendingXkbMigration = { tokens: tokens, ruleIds: newRules.map(function(r) { return r.id }) }
+    var next = root.userRules.concat(newRules)
+    root.saveUserRules(next)
+    // Mirrors setRuleEnabled's pattern: update in-memory state synchronously
+    // (the FileView watch re-confirms from disk) so applyRules() below
+    // renders the NEW rules, not the pre-migration catalog.
+    root.userRules = next
+    root.recomputeRules()
+    root.applyRules()
+  }
+
+  function rollbackMigration() {
+    var mig = root.pendingXkbMigration
+    if (!mig) return
+    var drop = {}
+    mig.ruleIds.forEach(function(id) { drop[id] = true })
+    var next = root.userRules.filter(function(r) { return !drop[r.id] })
+    root.pendingXkbMigration = null
+    root.saveUserRules(next)
+    root.userRules = next
+    root.recomputeRules()
+  }
+
   FileView {
     id: pendingFile
     path: root.pendingPath
@@ -523,16 +769,32 @@ Panel {
       onStreamFinished: {
         root.applying = false
         var ok = false
+        var errDetail = ""
         try {
-          ok = JSON.parse(String(text || "").trim()).ok === true
+          var payload = JSON.parse(String(text || "").trim())
+          ok = payload.ok === true
+          errDetail = String(payload.error || "")
         } catch (e) {
           ok = false
         }
         if (ok) {
           root.lastMessage = "Applied."
         } else {
-          var detail = applyProcess.stderrText.trim()
+          var detail = errDetail !== "" ? errDetail : applyProcess.stderrText.trim()
           root.lastMessage = detail !== "" ? ("Apply failed: " + detail) : "Apply failed — see notification."
+        }
+        // Migration phase 2: the XKB options come out ONLY after the keyd
+        // side is live. On failure the created rules roll back, restoring
+        // the exact pre-migration state (XKB options untouched either way).
+        var mig = root.pendingXkbMigration
+        if (mig) {
+          if (ok) {
+            root.pendingXkbMigration = null
+            root.removeXkbOptions(mig.tokens)
+          } else {
+            root.rollbackMigration()
+            root.lastMessage = "Migration aborted, XKB options kept. " + root.lastMessage
+          }
         }
         Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper", root.lastMessage])
         root.refreshNow()
@@ -557,6 +819,13 @@ Panel {
 
   function toggleRule(rule) {
     if (root.applying) return
+    if (!root.isRuleEnabled(rule)) {
+      var collision = root.enabledDuplicateError(rule)
+      if (collision !== "") {
+        root.lastMessage = collision
+        return
+      }
+    }
     root.setRuleEnabled(rule.id, !root.isRuleEnabled(rule))
     root.applyRules()
   }
@@ -710,7 +979,7 @@ Panel {
 
                 PanelToolTip {
                   visible: ruleHover.containsMouse
-                  text: ruleRow.modelData.source + " = overload(" + ruleRow.modelData.holdLayer + ", " + ruleRow.modelData.tap + ")"
+                  text: root.ruleSyntax(ruleRow.modelData)
                   fontFamily: root.fontFamily
                 }
 
@@ -775,6 +1044,16 @@ Panel {
                 TextField { id: descriptionField; width: parent.width; placeholderText: "Description (optional)"; foreground: root.foreground }
 
                 SearchableDropdown {
+                  id: typeDropdown
+                  width: parent.width
+                  label: "Rule type"
+                  placeholderText: "Search types..."
+                  triggerLabel: "Select type (default: tap/hold overload)"
+                  options: ["overload", "map", "swap"]
+                  foreground: root.foreground
+                }
+
+                SearchableDropdown {
                   id: sourceDropdown
                   width: parent.width
                   label: "Source key"
@@ -786,6 +1065,7 @@ Panel {
 
                 SearchableDropdown {
                   id: holdLayerDropdown
+                  visible: typeDropdown.value === "" || typeDropdown.value === "overload"
                   width: parent.width
                   label: "Hold layer"
                   placeholderText: "Search layers..."
@@ -796,10 +1076,22 @@ Panel {
 
                 SearchableDropdown {
                   id: tapDropdown
+                  visible: typeDropdown.value === "" || typeDropdown.value === "overload"
                   width: parent.width
                   label: "Tap key"
                   placeholderText: "Search keys..."
                   triggerLabel: "Select tap key"
+                  options: root.keyNames
+                  foreground: root.foreground
+                }
+
+                SearchableDropdown {
+                  id: targetDropdown
+                  visible: typeDropdown.value === "map" || typeDropdown.value === "swap"
+                  width: parent.width
+                  label: "Target key"
+                  placeholderText: "Search keys..."
+                  triggerLabel: "Select target key"
                   options: root.keyNames
                   foreground: root.foreground
                 }
@@ -818,9 +1110,11 @@ Panel {
                     onClicked: {
                       var error = root.addRule({
                         description: descriptionField.text,
+                        type: typeDropdown.value,
                         source: sourceDropdown.value,
                         holdLayer: holdLayerDropdown.value,
-                        tap: tapDropdown.value
+                        tap: tapDropdown.value,
+                        target: targetDropdown.value
                       })
                       if (error !== "") {
                         formError.text = error
@@ -828,9 +1122,11 @@ Panel {
                       }
                       formError.text = ""
                       descriptionField.text = ""
+                      typeDropdown.value = ""
                       sourceDropdown.value = ""
                       holdLayerDropdown.value = ""
                       tapDropdown.value = ""
+                      targetDropdown.value = ""
                       addRuleForm.visible = false
                     }
                   }
@@ -878,12 +1174,14 @@ Panel {
             }
           }
 
-          // ----- System mappings outside keyd's reach (read-only) -----
+          // ----- System mappings outside keyd's reach -----
           //
           // The compositor's own XKB options apply AFTER keyd, so they are
           // part of the effective mapping for every key this plugin emits.
-          // Shown for awareness + conflict context only; they are edited in
-          // the Hyprland config, never from here.
+          // Options can be removed/added here (rewrites the Hyprland config;
+          // chezmoi-tracked files are re-added so the change survives
+          // `chezmoi apply`), or MIGRATED into equivalent keyd rules, which
+          // moves ownership of that mapping into this plugin.
           PanelSeparator {
             visible: xkbSection.visible
             foreground: root.foreground
@@ -891,12 +1189,12 @@ Panel {
 
           Column {
             id: xkbSection
-            visible: root.xkbAvailable && xkbRepeater.count > 0
+            visible: root.xkbAvailable
             width: parent.width
             spacing: Style.space(6)
 
             PanelSectionHeader {
-              text: "XKB — VIA HYPRLAND (READ-ONLY)"
+              text: "XKB — VIA HYPRLAND"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -905,33 +1203,156 @@ Panel {
               id: xkbRepeater
               model: root.xkbRows()
 
-              delegate: Column {
+              delegate: Item {
+                id: xkbRow
+                required property var modelData
                 width: parent.width
-                spacing: 0
+                height: Math.max(xkbRowLabel.implicitHeight, xkbRowActions.implicitHeight)
 
-                Text {
-                  width: parent.width
-                  text: modelData.label !== "" ? modelData.label : modelData.token
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
+                Column {
+                  id: xkbRowLabel
+                  anchors.left: parent.left
+                  anchors.right: xkbRowActions.left
+                  anchors.rightMargin: Style.space(6)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: 0
+
+                  Text {
+                    width: parent.width
+                    text: modelData.label !== "" ? modelData.label : modelData.token
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Text {
+                    visible: modelData.label !== ""
+                    width: parent.width
+                    text: modelData.token
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
 
-                Text {
-                  visible: modelData.label !== ""
-                  width: parent.width
-                  text: modelData.token
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                Row {
+                  id: xkbRowActions
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(6)
+
+                  // Migrate this option into keyd rule(s), then drop the
+                  // option -- only shown for options with known semantics.
+                  Button {
+                    visible: xkbRow.modelData.migratable
+                    text: "→ keyd"
+                    fontSize: Style.font.caption
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    horizontalPadding: Style.spacing.controlPaddingX
+                    verticalPadding: Style.spacing.controlPaddingY
+                    bordered: true
+                    enabled: !root.applying && !root.xkbApplying && root.pendingXkbMigration === null
+                    onClicked: root.migrateXkbOptions([xkbRow.modelData.token])
+                  }
+
+                  PanelActionButton {
+                    iconText: "-"
+                    tooltipText: "Remove " + xkbRow.modelData.token + " from kb_options"
+                    foreground: root.foreground
+                    hoverColor: Color.urgent
+                    enabled: !root.xkbApplying && root.pendingXkbMigration === null
+                    onClicked: root.removeXkbOption(xkbRow.modelData.token)
+                  }
+                }
+              }
+            }
+
+            Row {
+              spacing: Style.space(12)
+              visible: !addXkbForm.visible
+
+              Text {
+                visible: root.xkbAddableOptions().length > 0
+                text: "+ Add option"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: addXkbForm.visible = true
+                }
+              }
+
+              Text {
+                visible: root.xkbMigratableTokens().length > 1
+                text: "Migrate all to keyd"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
+                }
+              }
+            }
+
+            Column {
+              id: addXkbForm
+              visible: false
+              width: parent.width
+              spacing: Style.space(6)
+
+              SearchableDropdown {
+                id: xkbOptionDropdown
+                width: parent.width
+                label: "XKB option"
+                placeholderText: "Search options..."
+                triggerLabel: "Select option"
+                options: root.xkbAddableOptions()
+                foreground: root.foreground
+              }
+
+              Row {
+                spacing: Style.space(8)
+
+                Button {
+                  text: "Add"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY
+                  bordered: true
+                  enabled: !root.xkbApplying
+                  onClicked: {
+                    root.addXkbOption(xkbOptionDropdown.value)
+                    xkbOptionDropdown.value = ""
+                    addXkbForm.visible = false
+                  }
+                }
+
+                Button {
+                  text: "Cancel"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY
+                  bordered: true
+                  onClicked: addXkbForm.visible = false
                 }
               }
             }
 
             Text {
               width: parent.width
-              text: "Live compositor kb_options. Applied after keyd — edit in your Hyprland input config, not here."
+              text: "Live compositor kb_options, applied after keyd. − removes an option; → keyd migrates it into a rule above (option removed once the keyd side is live)."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
