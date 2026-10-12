@@ -1136,16 +1136,41 @@ Panel {
               }
             }
 
-            Text {
+            Item {
               visible: root.rulesInScope(root.selectedScopeId).length === 0
-              text: root.selectedScopeId === "*"
-                ? "No global rules."
-                : "No rules scoped to this device. Global rules still apply to it."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
               width: parent.width
+              height: emptyScopeText.implicitHeight
+
+              Text {
+                id: emptyScopeText
+                text: root.selectedScopeId === "*" ? "No global rules." : "No rules scoped to this device."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                visible: root.selectedScopeId !== "*"
+                anchors.left: emptyScopeText.right
+                anchors.leftMargin: Style.space(6)
+                text: "(?)"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  id: emptyScopeHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
+                }
+              }
+
+              PanelToolTip {
+                visible: emptyScopeHover.containsMouse
+                text: "Global rules still apply to this device."
+                fontFamily: root.fontFamily
+              }
             }
 
             Repeater {
@@ -1441,10 +1466,41 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
 
-            PanelSectionHeader {
-              text: "XKB — VIA HYPRLAND"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            Item {
+              width: parent.width
+              height: xkbHeader.implicitHeight
+
+              PanelSectionHeader {
+                id: xkbHeader
+                anchors.left: parent.left
+                text: "XKB — VIA HYPRLAND"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              // The explainer lives behind this hover hint; as always-on
+              // caption text it dominated the section.
+              Text {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: "(?)"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  id: xkbInfoHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
+                }
+              }
+
+              PanelToolTip {
+                visible: xkbInfoHover.containsMouse
+                text: "Live compositor kb_options, applied after keyd. − removes an option; → keyd migrates it into a rule above (option removed once the keyd side is live)."
+                fontFamily: root.fontFamily
+              }
             }
 
             Repeater {
@@ -1495,6 +1551,7 @@ Panel {
                   Button {
                     visible: xkbRow.modelData.migratable
                     text: "→ keyd"
+                    tooltipText: "Migrate " + xkbRow.modelData.token + " into keyd rule(s), then remove it here (option stays until the keyd side is live)"
                     fontSize: Style.font.caption
                     foreground: root.foreground
                     fontFamily: root.fontFamily
@@ -1598,14 +1655,6 @@ Panel {
               }
             }
 
-            Text {
-              width: parent.width
-              text: "Live compositor kb_options, applied after keyd. − removes an option; → keyd migrates it into a rule above (option removed once the keyd side is live)."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
           }
 
           PanelSeparator {
