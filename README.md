@@ -153,15 +153,27 @@ unifying receiver also arrives as "USB Receiver" and would be hidden —
 hand-edit `user-rules.json` with its vid:pid instead (or adjust the one
 regex in `bin/list-keyboards`).
 
-**A tab is per-model, not per-instance.** keyd's `[ids]` matches
-vendor:product only — there is no serial-number or per-instance matching.
-Two identical keyboards of the same model share one tab, and a scoped
-rule applies to every connected instance of that model. Rules group by
-scope into separate keyd configs at apply time: the global scope installs
-as `/etc/keyd/houz42-keyboard-remapper.conf`, device scopes as
-`houz42-keyboard-remapper_<vid:pid>.conf` (which sorts after the global
-file, so device bindings override global ones for the same key — keyd
-merges every matching file per device, later files winning). The rendered
+**A tab is per-model, not per-instance.** keyd's `[ids]` matches the
+device id, which even in 2.6.0 is `vid:pid:hash` with the hash over
+(key-count, capability masks, device name) — identical for two same-model
+boards, so there is no serial-number or per-instance matching at all.
+Two identical keyboards share one tab, and a scoped rule applies to every
+connected instance of that model. (If you truly need per-instance
+remaps, keyd is the wrong backend — that would take a udev-path-matching
+daemon like interception-tools, stable only while each board stays in the
+same USB port.)
+
+**keyd applies exactly ONE config per device** — an explicit-`[ids]` file
+beats the wildcard `[ids] *` file, and nothing merges across files. So the
+renderer inlines the global rules into every device chunk: a scoped
+keyboard keeps all global rules plus its own. A consequence of the
+one-config rule is that two different device scopes covering the same id
+(e.g. `05ac:0220` and `05ac:0220+046d:c548`) tie, and the winner is
+filesystem order — effectively random. The form refuses that overlap;
+hand-edited files are your own responsibility.
+
+The global scope installs as `/etc/keyd/houz42-keyboard-remapper.conf`,
+device scopes as `houz42-keyboard-remapper_<vid:pid>.conf`. The rendered
 blob carries one chunk per scope headed by a `### ... scope:` comment
 (keyd ignores it; it's installed with the chunk), which is what lets the
 drift check stay a dumb byte-diff. Scoping a rule to a device that no

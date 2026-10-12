@@ -322,6 +322,14 @@ Panel {
   // matches LC_ALL=C filename order of the installed set: "*.conf" sorts
   // before any id, and a multi-id scope ("a+b.conf") sorts before its
   // prefix single-id scope ("a.conf"), exactly like the shell's glob.
+  //
+  // keyd applies exactly ONE config per device: lookup_config_ent() picks
+  // the best [ids] rank (explicit id beats the wildcard) and there is NO
+  // cross-file merging. So a device with its own conf would silently LOSE
+  // every global rule -- global lines are inlined into each device chunk
+  // instead (device rules last, so they'd win a same-source tie under
+  // keyd's last-binding-wins layer table, though the duplicate guard
+  // already refuses that combination).
   function renderConf() {
     var groups = {}
     var scopes = []
@@ -336,6 +344,10 @@ Panel {
       groups[key].push(root.ruleSyntax(rule))
     }
     if (scopes.indexOf("*") === -1) scopes.push("*")
+    var globalLines = groups["*"] || []
+    for (var s = 0; s < scopes.length; s++) {
+      if (scopes[s] !== "*") groups[scopes[s]] = globalLines.concat(groups[scopes[s]])
+    }
     scopes.sort(function(a, b) {
       var fa = a + ".conf", fb = b + ".conf"
       return fa < fb ? -1 : fa > fb ? 1 : 0
@@ -350,6 +362,29 @@ Panel {
       for (var b = 0; b < lines.length; b++) blob += lines[b] + "\n"
     }
     return blob
+  }
+
+  // Scope-set conflict, distinct from the per-source duplicate guard:
+  // keyd picks ONE best-matching conf per device, and two files listing
+  // the same id tie at the same rank -- the winner is readdir order, i.e.
+  // effectively random per apply. So every device id may appear in at most
+  // one DISTINCT non-global scope (a single scope holding many rules is
+  // fine; global rules inline into every chunk and can't tie).
+  function scopeConflictError(candidate) {
+    var candScope = root.ruleScope(candidate)
+    if (candScope[0] === "*") return ""
+    var candSet = candScope.slice().sort().join("+")
+    for (var i = 0; i < root.rules.length; i++) {
+      var other = root.rules[i]
+      var otherScope = root.ruleScope(other)
+      if (otherScope[0] === "*") continue
+      var otherSet = otherScope.slice().sort().join("+")
+      if (otherSet === candSet) continue
+      if (root.scopesOverlap(candScope, otherScope)) {
+        return "Device scope overlaps '" + (other.label || other.id) + "' — keyd applies only ONE config per device, so two different scopes covering the same keyboard would pick one at random. Add the rule to the existing scope instead."
+      }
+    }
+    return ""
   }
 
   function ruleSyntax(rule) {
@@ -553,6 +588,8 @@ Panel {
 
     var collision = root.duplicateError([rule])
     if (collision !== "") return collision
+    var scopeCollision = root.scopeConflictError(rule)
+    if (scopeCollision !== "") return scopeCollision
     root.saveUserRules(root.userRules.concat([rule]))
     return ""
   }
