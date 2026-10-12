@@ -75,7 +75,7 @@ Panel {
 
   Process {
     id: keyboardsProcess
-    running: false
+    running: true   // populate once at load; re-runs each popup open
     command: [root.binDir + "/list-keyboards"]
 
     stdout: StdioCollector {
@@ -126,15 +126,18 @@ Panel {
     return "global (all keyboards)"
   }
 
-  // ----- Scope tabs: one per device scope present in the catalog -----
+  // ----- Scope tabs: Global + one per keyboard on the machine -----
   //
-  // Selected by scope KEY, not index, so the selection survives the tab
-  // list being rebuilt on every refresh (a tab's position shifts as rules
-  // are added/removed). A selected scope that vanishes (its last rule was
-  // removed) falls back to Global -- see onRulesChanged below.
+  // Tabs mirror the HARDWARE (every keyboard udev sees), not just scopes
+  // that already have rules -- so the per-keyboard UI is visible before
+  // any scoped rule exists, and adding a rule from a device tab presets
+  // that device. Scopes present in the catalog but referencing unplugged
+  // devices keep a raw-id tab so their rules never disappear. Selected by
+  // scope KEY, not index, so selection survives the tab list rebuilding on
+  // every refresh; a selected scope that vanishes falls back to Global.
   property string selectedScopeId: "*"
 
-  onRulesChanged: {
+  function ensureSelectedScope() {
     var tabs = root.scopeTabs()
     for (var i = 0; i < tabs.length; i++) {
       if (tabs[i].key === root.selectedScopeId) return
@@ -142,18 +145,25 @@ Panel {
     root.selectedScopeId = "*"
   }
 
+  onRulesChanged: root.ensureSelectedScope()
+  onKeyboardsChanged: root.ensureSelectedScope()
+
   function scopeTabs() {
-    var keys = []
-    for (var i = 0; i < root.rules.length; i++) {
+    var keys = ["*"]
+    var i
+    for (i = 0; i < root.keyboards.length; i++) {
+      if (keys.indexOf(root.keyboards[i].id) === -1) keys.push(root.keyboards[i].id)
+    }
+    for (i = 0; i < root.rules.length; i++) {
       var k = root.scopeKey(root.rules[i])
       if (keys.indexOf(k) === -1) keys.push(k)
     }
-    if (keys.indexOf("*") === -1) keys.push("*")
-    keys.sort(function(a, b) {
-      var fa = a + ".conf", fb = b + ".conf"
-      return fa < fb ? -1 : fa > fb ? 1 : 0
+    var rest = keys.slice(1)
+    rest.sort(function(a, b) {
+      var la = root.scopeLabel(a).toLowerCase(), lb = root.scopeLabel(b).toLowerCase()
+      return la < lb ? -1 : la > lb ? 1 : 0
     })
-    return keys.map(function(k) {
+    return ["*"].concat(rest).map(function(k) {
       return { key: k, label: k === "*" ? "Global" : root.scopeLabel(k) }
     })
   }
@@ -1088,11 +1098,13 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            // Scope tabs: only shown once a device-scoped rule exists (a
-            // single Global list is the common case and needs no chrome).
-            Row {
+            // Scope tabs: Global plus every keyboard seen on the machine.
+            // Flow (not Row) so the chips WRAP -- several long device names
+            // would otherwise run off the popup's fixed narrow width.
+            Flow {
               id: scopeChips
               visible: root.scopeTabs().length > 1
+              width: parent.width
               spacing: Style.space(6)
 
               Repeater {
@@ -1114,10 +1126,14 @@ Panel {
 
             Text {
               visible: root.rulesInScope(root.selectedScopeId).length === 0
-              text: "No rules in this scope."
+              text: root.selectedScopeId === "*"
+                ? "No global rules."
+                : "No rules scoped to this device. Global rules still apply to it."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              width: parent.width
             }
 
             Repeater {
