@@ -69,8 +69,8 @@ Panel {
 
   // Real keyboards for the per-device rule picker, from bin/list-keyboards
   // (sysfs + udev, no root). Refreshed when the popup opens; a device
-  // unplugged since a rule was created still renders by raw id (see
-  // deviceBadge), so stale rules never become invisible.
+  // unplugged since a rule was created still gets its own scope tab by raw
+  // id (see scopeTabs), so stale rules never become invisible.
   property var keyboards: []
 
   Process {
@@ -99,19 +99,67 @@ Panel {
     return opts
   }
 
-  // "only on X" badge for a device-scoped rule row; "" for global rules.
-  function deviceBadge(rule) {
-    var d = rule.devices
-    if (!d || d.length === 0) return ""
+  // Human label for a scope key: device names when currently seen, raw ids
+  // otherwise. Shared by the scope tabs and the add-form preset.
+  function scopeLabel(key) {
+    var ids = key.split("+")
     var names = []
-    for (var i = 0; i < d.length; i++) {
+    for (var i = 0; i < ids.length; i++) {
       var found = ""
       for (var j = 0; j < root.keyboards.length; j++) {
-        if (root.keyboards[j].id === d[i]) { found = root.keyboards[j].name; break }
+        if (root.keyboards[j].id === ids[i]) { found = root.keyboards[j].name; break }
       }
-      names.push(found !== "" ? found : d[i])
+      names.push(found !== "" ? found : ids[i])
     }
-    return "only on " + names.join(", ")
+    return names.join(" + ")
+  }
+
+  // The add-form device option matching a scope (single-id scopes only;
+  // multi-id tabs have no single dropdown entry, so they preset global).
+  function deviceOptionFor(key) {
+    if (key === "*") return "global (all keyboards)"
+    var ids = key.split("+")
+    if (ids.length !== 1) return "global (all keyboards)"
+    for (var i = 0; i < root.keyboards.length; i++) {
+      if (root.keyboards[i].id === ids[0]) return root.keyboards[i].name + " (" + ids[0] + ")"
+    }
+    return "global (all keyboards)"
+  }
+
+  // ----- Scope tabs: one per device scope present in the catalog -----
+  //
+  // Selected by scope KEY, not index, so the selection survives the tab
+  // list being rebuilt on every refresh (a tab's position shifts as rules
+  // are added/removed). A selected scope that vanishes (its last rule was
+  // removed) falls back to Global -- see onRulesChanged below.
+  property string selectedScopeId: "*"
+
+  onRulesChanged: {
+    var tabs = root.scopeTabs()
+    for (var i = 0; i < tabs.length; i++) {
+      if (tabs[i].key === root.selectedScopeId) return
+    }
+    root.selectedScopeId = "*"
+  }
+
+  function scopeTabs() {
+    var keys = []
+    for (var i = 0; i < root.rules.length; i++) {
+      var k = root.scopeKey(root.rules[i])
+      if (keys.indexOf(k) === -1) keys.push(k)
+    }
+    if (keys.indexOf("*") === -1) keys.push("*")
+    keys.sort(function(a, b) {
+      var fa = a + ".conf", fb = b + ".conf"
+      return fa < fb ? -1 : fa > fb ? 1 : 0
+    })
+    return keys.map(function(k) {
+      return { key: k, label: k === "*" ? "Global" : root.scopeLabel(k) }
+    })
+  }
+
+  function rulesInScope(scope) {
+    return root.rules.filter(function(r) { return root.scopeKey(r) === scope })
   }
 
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/houz42.keyboard-remapper"
@@ -1040,8 +1088,40 @@ Panel {
               fontFamily: root.fontFamily
             }
 
+            // Scope tabs: only shown once a device-scoped rule exists (a
+            // single Global list is the common case and needs no chrome).
+            Row {
+              id: scopeChips
+              visible: root.scopeTabs().length > 1
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.scopeTabs()
+
+                delegate: Button {
+                  text: modelData.label
+                  selected: root.selectedScopeId === modelData.key
+                  bordered: true
+                  fontSize: Style.font.caption
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: root.selectedScopeId = modelData.key
+                }
+              }
+            }
+
+            Text {
+              visible: root.rulesInScope(root.selectedScopeId).length === 0
+              text: "No rules in this scope."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
             Repeater {
-              model: root.rules
+              model: root.rulesInScope(root.selectedScopeId)
 
               Item {
                 id: ruleRow
@@ -1073,16 +1153,6 @@ Panel {
                     visible: (ruleRow.modelData.description || "") !== ""
                     width: parent.width
                     text: ruleRow.modelData.description || ""
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                  }
-
-                  Text {
-                    visible: text !== ""
-                    width: parent.width
-                    text: root.deviceBadge(ruleRow.modelData)
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -1164,7 +1234,12 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: addRuleForm.visible = true
+                  onClicked: {
+                    // Opened from a scope tab -> preset that device, so a
+                    // rule added from the Milsky tab lands on the Milsky.
+                    deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
+                    addRuleForm.visible = true
+                  }
                 }
               }
 

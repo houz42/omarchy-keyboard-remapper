@@ -140,8 +140,12 @@ that copy to detect drift — the read-only status script never needs to know
 what a "rule" is, it just diffs two blobs.
 
 **Per-device rules.** A rule is global by default; the add-rule form's
-device dropdown scopes it to one keyboard. Rules group by scope into
-separate keyd configs at apply time: the global scope installs as
+device dropdown scopes it to one keyboard. Once any scoped rule exists,
+the popup shows **one tab per keyboard** (Global first) and each tab lists
+only its scope's rules; the add form opened from a device tab presets that
+device. A rule scoped to an unplugged device keeps a raw-id tab, so it
+never becomes invisible. Rules group by scope into separate keyd configs
+at apply time: the global scope installs as
 `/etc/keyd/houz42-keyboard-remapper.conf`, device scopes as
 `houz42-keyboard-remapper_<vid:pid>.conf` (which sorts after the global
 file, so device bindings override global ones for the same key — keyd
