@@ -1132,7 +1132,14 @@ Panel {
             root.lastMessage = "Migration pending: rules kept, XKB options still active. Use Re-apply to finish. " + root.lastMessage
           }
         }
-        Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper", root.lastMessage])
+        // Failures (dismissed pkexec prompt included) toast at CRITICAL
+        // urgency -- a missed normal toast was the whole reason a dead
+        // Re-apply read as "nothing happens".
+        if (ok) {
+          Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "Keyboard Remapper", root.lastMessage])
+        } else {
+          Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "-u", "critical", "Keyboard Remapper", root.lastMessage])
+        }
         root.refreshNow()
       }
     }
