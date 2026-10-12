@@ -18,11 +18,16 @@
 
 set -euo pipefail
 
-new="${1:?usage: set-xkb-options <new-options-string>}"
+if [[ $# -lt 1 ]]; then
+  jq -nc '{ok: false, error: "usage: set-xkb-options <new-options-string>"}'
+  exit 1
+fi
+new="$1"
 
 # Strict token charset: letters, digits, colon, comma, underscore. Anything
 # else (quote, space, backslash, $) could break out of the config string.
-# Empty is valid -- it means "no options".
+# EMPTY IS VALID -- it means "no options" (e.g. migrating the last option
+# away); ${1:?} would wrongly reject it, so this uses an argc check.
 if [[ ! $new =~ ^[a-zA-Z0-9_:,]*$ ]]; then
   jq -nc '{ok: false, error: "invalid characters in options string"}'
   exit 1

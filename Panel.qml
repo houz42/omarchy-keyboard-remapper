@@ -902,6 +902,12 @@ Panel {
           msg = "XKB update failed (no result from writer)"
         }
         root.lastMessage = msg
+        // A failed XKB write during migration phase 2 leaves the option
+        // active alongside the now-live keyd rules -- a double-map that
+        // cancels the remap. Too dangerous for a status line only.
+        if (msg.indexOf("XKB update failed") === 0) {
+          Quickshell.execDetached(["notify-send", "-a", "Keyboard Remapper", "-u", "critical", "Keyboard Remapper", msg])
+        }
         root.refreshNow()
         xkbPostWriteTimer.restart()
       }
@@ -1241,32 +1247,11 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            Item {
-              width: parent.width
-              height: rulesHeader.implicitHeight
-
-              PanelSectionHeader {
-                id: rulesHeader
-                anchors.left: parent.left
-                text: "RULES"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              PanelActionButton {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                iconText: "\uf067"
-                tooltipText: "Add rule"
-                foreground: root.foreground
-                bordered: true
-                onClicked: {
-                  // Opened from a scope tab -> preset that device, so a
-                  // rule added from the Milsky tab lands on the Milsky.
-                  deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
-                  addRuleForm.visible = true
-                }
-              }
+            PanelSectionHeader {
+              id: rulesHeader
+              text: "RULES"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             // Scope tabs: Global plus every keyboard seen on the machine.
@@ -1446,20 +1431,42 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
-              Text {
-                visible: root.hiddenShipped.length > 0 && !addRuleForm.visible
-                text: "Restore " + root.hiddenShipped.length + " hidden shipped rule" + (root.hiddenShipped.length === 1 ? "" : "s")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+              // Add affordance: framed plus button on its own row at the
+              // END of the list (header placement read as noise). Restore
+              // link shares the row when hidden shipped rules exist.
+              Row {
+                spacing: Style.space(12)
+                visible: !addRuleForm.visible
 
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
+                PanelActionButton {
+                  iconText: "\uf067"
+                  tooltipText: "Add rule"
+                  foreground: root.foreground
+                  bordered: true
                   onClicked: {
-                    root.hiddenShipped = []
-                    hiddenShippedFile.setText("[]\n")
-                    root.recomputeRules()
+                    // Opened from a scope tab -> preset that device, so a
+                    // rule added from the Milsky tab lands on the Milsky.
+                    deviceDropdown.value = root.deviceOptionFor(root.selectedScopeId)
+                    addRuleForm.visible = true
+                  }
+                }
+
+                Text {
+                  visible: root.hiddenShipped.length > 0
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Restore " + root.hiddenShipped.length + " hidden shipped rule" + (root.hiddenShipped.length === 1 ? "" : "s")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      root.hiddenShipped = []
+                      hiddenShippedFile.setText("[]\n")
+                      root.recomputeRules()
+                    }
                   }
                 }
               }
@@ -1646,36 +1653,21 @@ Panel {
                 fontFamily: root.fontFamily
               }
 
-              Row {
+              // The explainer lives behind this hover hint; as always-on
+              // caption text it dominated the section.
+              Text {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+                text: "(?)"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
 
-                PanelActionButton {
-                  anchors.verticalCenter: parent.verticalCenter
-                  iconText: "\uf067"
-                  tooltipText: "Add XKB option"
-                  foreground: root.foreground
-                  bordered: true
-                  enabled: !root.xkbApplying && root.pendingXkbMigration === null
-                  onClicked: addXkbForm.visible = true
-                }
-
-                // The explainer lives behind this hover hint; as always-on
-                // caption text it dominated the section.
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "(?)"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-
-                  MouseArea {
-                    id: xkbInfoHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    acceptedButtons: Qt.NoButton
-                  }
+                MouseArea {
+                  id: xkbInfoHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
                 }
               }
 
@@ -1757,17 +1749,32 @@ Panel {
               }
             }
 
-            Text {
-              visible: root.xkbMigratableTokens().length > 1 && !addXkbForm.visible
-              text: "Migrate all to keyd"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+            Row {
+              spacing: Style.space(12)
+              visible: !addXkbForm.visible
 
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
+              PanelActionButton {
+                iconText: "\uf067"
+                tooltipText: "Add XKB option"
+                foreground: root.foreground
+                bordered: true
+                enabled: !root.xkbApplying && root.pendingXkbMigration === null
+                onClicked: addXkbForm.visible = true
+              }
+
+              Text {
+                visible: root.xkbMigratableTokens().length > 1
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Migrate all to keyd"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.migrateXkbOptions(root.xkbMigratableTokens())
+                }
               }
             }
 
