@@ -565,12 +565,18 @@ Panel {
   }
 
   // Writes the popup-added rule catalog back to user-rules.json -- never to
-  // the shipped/tracked rules.json. userRulesFile's watchChanges then
-  // reloads and re-derives everything else (merged rule list, pending
-  // conf, status) from the new content, so this is the only place that
-  // needs to know the file format.
+  // the shipped/tracked rules.json. Updates the in-memory list
+  // SYNCHRONOUSLY (setRuleEnabled's pattern): userRulesFile's own setText
+  // write does NOT retrigger its watchChanges/onLoaded round-trip, so
+  // relying on it left root.userRules stale -- the add "succeeded" (file
+  // written) but the rule never appeared, and a second add clobbered the
+  // file from the stale list. The watch still re-confirms from disk for
+  // external edits, so this is the only place that needs to know the file
+  // format.
   function saveUserRules(newUserRules) {
+    root.userRules = newUserRules
     userRulesFile.setText(JSON.stringify({ rules: newUserRules }, null, 2) + "\n")
+    root.recomputeRules()
   }
 
   function slugify(text) {
@@ -1082,13 +1088,9 @@ Panel {
     // or plugin reload, and the apply handler completes phase 2 whenever an
     // apply eventually succeeds.
     root.setPendingMigration({ tokens: tokens, ruleIds: newRules.map(function(r) { return r.id }) })
-    var next = root.userRules.concat(newRules)
-    root.saveUserRules(next)
-    // Mirrors setRuleEnabled's pattern: update in-memory state synchronously
-    // (the FileView watch re-confirms from disk) so applyRules() below
-    // renders the NEW rules, not the pre-migration catalog.
-    root.userRules = next
-    root.recomputeRules()
+    // saveUserRules syncs the in-memory catalog itself, so applyRules()
+    // below renders the NEW rules, not the pre-migration catalog.
+    root.saveUserRules(root.userRules.concat(newRules))
     root.applyRules()
   }
 
